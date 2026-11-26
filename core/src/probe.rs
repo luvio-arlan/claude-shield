@@ -16,6 +16,21 @@ pub struct ChannelProbe {
     pub reachable: bool,
 }
 
+impl ChannelProbe {
+    pub fn unreachable() -> Self {
+        Self {
+            ip: "不可达".to_string(),
+            latency_ms: None,
+            colo: None,
+            loc: None,
+            tls: None,
+            http: None,
+            warp: None,
+            reachable: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiLatencyMetrics {
     /// Calibrated real-world 1-RTT HTTP/2 latency (warmed keep-alive median/min, zero handshake inflation)

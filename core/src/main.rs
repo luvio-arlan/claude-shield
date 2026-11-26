@@ -3,6 +3,7 @@ mod guard;
 mod patrol;
 mod probe;
 mod purity;
+mod setup;
 
 use chrono::Local;
 use config::{tz_short_and_full, ShieldConfig};
@@ -10,6 +11,7 @@ use guard::{audit_local_defenses, hide_original_claude_app, kill_claude_desktop,
 use patrol::run_daily_patrol;
 use probe::{full_telemetry_probe, quick_gate_probe, ApiLatencyMetrics, ChannelProbe};
 use purity::run_purity_audit;
+use setup::{detect_environment, run_setup, run_uninstall, SetupOptions};
 use serde::Serialize;
 use std::env;
 use std::os::unix::process::CommandExt;
@@ -87,13 +89,84 @@ async fn main() {
             cmd_exec_cli(&cfg, &real_bin, &pass_args).await;
         }
         "launch-desktop" => {
-            cmd_launch_desktop(&cfg).await;
+            let force = args.iter().any(|a| a == "--force");
+            cmd_launch_desktop(&cfg, force).await;
+        }
+        "detect" => {
+            let preferred_port = arg_value(&args, "--port").and_then(|s| s.parse::<u16>().ok());
+            let res = detect_environment(&cfg, preferred_port).await;
+            if json_mode {
+                println!("{}", serde_json::to_string(&res).unwrap_or_default());
+            } else {
+                println!(
+                    "Proxy :{} ({}) | Exit IP: {} | TUN IP: {} | TZ: {} | City: {}, {}",
+                    res.proxy_port,
+                    if res.proxy_reachable { "OK" } else { "OFF" },
+                    if res.exit_ip.is_empty() { "-" } else { &res.exit_ip },
+                    if res.tun_ip.is_empty() { "-" } else { &res.tun_ip },
+                    res.detected_tz,
+                    res.city,
+                    res.country_code
+                );
+            }
+        }
+        "setup" => {
+            let ip = arg_value(&args, "--ip").unwrap_or_else(|| cfg.expected_ip.clone());
+            let port = arg_value(&args, "--port")
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(cfg.proxy_port);
+            let tz = arg_value(&args, "--tz").unwrap_or_else(|| cfg.target_tz.clone());
+            let hide_original = !args.iter().any(|a| a == "--no-hide");
+            let enable_autostart = !args.iter().any(|a| a == "--no-autostart");
+            let enable_daily_patrol = !args.iter().any(|a| a == "--no-patrol");
+            let app_bundle_path = arg_value(&args, "--app-path")
+                .unwrap_or_else(|| "/Applications/Claude Shield.app".to_string());
+            let opts = SetupOptions {
+                expected_ip: ip,
+                proxy_port: port,
+                target_tz: tz,
+                hide_original,
+                enable_autostart,
+                enable_daily_patrol,
+                app_bundle_path,
+            };
+            let report = run_setup(&cfg, &opts);
+            if json_mode {
+                println!("{}", serde_json::to_string(&report).unwrap_or_default());
+            } else {
+                println!("🛡️  Claude Shield 一键部署完成");
+                for a in &report.actions {
+                    println!("  ✅ {}", a);
+                }
+                for w in &report.warnings {
+                    println!("  ⚠️  {}", w);
+                }
+            }
+        }
+        "uninstall" => {
+            let remove_app = args.iter().any(|a| a == "--remove-app");
+            let report = run_uninstall(&cfg, remove_app);
+            if json_mode {
+                println!("{}", serde_json::to_string(&report).unwrap_or_default());
+            } else {
+                println!("♻️  Claude Shield 已一键卸载并还原系统环境");
+                for r in &report.restored {
+                    println!("  ✅ {}", r);
+                }
+                for w in &report.warnings {
+                    println!("  ⚠️  {}", w);
+                }
+            }
         }
         _ => {
-            println!("Claude Shield Core v3.0 (Native Rust Engine)");
-            println!("Usage: claude-shield-core <telemetry|gate|purity|patrol|hide-original|exec-cli|launch-desktop> [--json]");
+            println!("Claude Shield Core v3.1 (Native Rust Engine)");
+            println!("Usage: claude-shield-core <telemetry|gate|purity|patrol|hide-original|detect|setup|uninstall|exec-cli|launch-desktop> [--json]");
         }
     }
+}
+
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
 async fn cmd_telemetry(cfg: &ShieldConfig) {
@@ -329,30 +402,36 @@ async fn cmd_exec_cli(cfg: &ShieldConfig, real_bin: &str, pass_args: &[String]) 
     std::process::exit(127);
 }
 
-async fn cmd_launch_desktop(cfg: &ShieldConfig) {
+async fn cmd_launch_desktop(cfg: &ShieldConfig, force: bool) {
     // 1. Auto-quarantine if /Applications/Claude.app reappeared
     if Path::new("/Applications/Claude.app").exists() {
         hide_original_claude_app(cfg);
     }
 
-    // 2. Fail-Closed dual-channel + claude.ai edge verification
-    let gate = evaluate_gate(cfg).await;
-    if !gate.ok {
-        let clean = gate
-            .error
-            .unwrap_or_else(|| "出口 IP 校验未通过".into())
-            .replace('\\', "\\\\")
-            .replace('"', "'");
-        let _ = Command::new("/usr/bin/osascript")
-            .args([
-                "-e",
-                &format!(
-                    "display dialog \"⚠️ Claude Shield 熔断拦截\\n\\n{}\" buttons {{\"知道了\"}} default button 1 with icon stop with title \"Claude Shield\"",
-                    clean
-                ),
-            ])
-            .status();
-        std::process::exit(1);
+    // 2. Fail-Closed dual-channel + claude.ai edge verification (unless --force)
+    let mut verified_ip: Option<String> = None;
+    if !force {
+        let gate = evaluate_gate(cfg).await;
+        if !gate.ok {
+            let clean = gate
+                .error
+                .unwrap_or_else(|| "出口 IP 校验未通过".into())
+                .replace('\\', "\\\\")
+                .replace('"', "'");
+            let _ = Command::new("/usr/bin/osascript")
+                .args([
+                    "-e",
+                    &format!(
+                        "display dialog \"⚠️ Claude Shield 熔断拦截\\n\\n{}\" buttons {{\"知道了\"}} default button 1 with icon stop with title \"Claude Shield\"",
+                        clean
+                    ),
+                ])
+                .status();
+            std::process::exit(1);
+        }
+        if !gate.proxy_ip.is_empty() && gate.proxy_ip != "无法连通" {
+            verified_ip = Some(gate.proxy_ip);
+        }
     }
 
     let vault_app = cfg.home_dir.join(".local/apps/Claude.app");
@@ -374,14 +453,20 @@ async fn cmd_launch_desktop(cfg: &ShieldConfig) {
     let defenses = audit_local_defenses(cfg);
     if defenses.desktop_pid.is_some() {
         if defenses.desktop_proxy_bound && defenses.desktop_quic_disabled {
-            let _ = Command::new("/usr/bin/osascript")
-                .args(["-e", "tell application id \"com.anthropic.claudefordesktop\" to activate"])
+            // `open -a <exact app path>` works even after lsregister -u, switches Spaces, and reopens minimized/closed windows
+            let _ = Command::new("/usr/bin/open")
+                .args(["-a", app_path.to_str().unwrap_or("/Applications/Claude.app")])
                 .status();
             return;
         } else {
             kill_claude_desktop();
             tokio::time::sleep(std::time::Duration::from_millis(350)).await;
         }
+    }
+
+    if let Some(ip) = verified_ip {
+        let _ = std::fs::create_dir_all(&cfg.config_dir);
+        let _ = std::fs::write(cfg.config_dir.join("last_launch_ip"), format!("{}\n", ip));
     }
 
     // 4. Launch with hardened Electron network isolation (detached)

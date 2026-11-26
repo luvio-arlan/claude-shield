@@ -287,6 +287,9 @@ if command -v swiftc >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/app/ClaudeShieldApp.
       ICON_NAME="app.icns"
     fi
   fi
+  if [[ -f "${REPO_ROOT}/assets/claude-spark-template.png" ]]; then
+    cp "${REPO_ROOT}/assets/claude-spark-template.png" "${SHIELD_APP}/Contents/Resources/claude-spark-template.png"
+  fi
 
   cat > "${SHIELD_APP}/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -297,8 +300,8 @@ if command -v swiftc >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/app/ClaudeShieldApp.
   <key>CFBundleIdentifier</key><string>com.local.claude.shield</string>
   <key>CFBundleName</key><string>Claude Shield</string>
   <key>CFBundleDisplayName</key><string>Claude Shield</string>
-  <key>CFBundleVersion</key><string>3.0</string>
-  <key>CFBundleShortVersionString</key><string>3.0</string>
+  <key>CFBundleVersion</key><string>3.1.0</string>
+  <key>CFBundleShortVersionString</key><string>3.1.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>${ICON_NAME}</string>
   <key>LSUIElement</key><true/>

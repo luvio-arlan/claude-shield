@@ -1,6 +1,7 @@
-# Rust build artifacts
+# Build & release artifacts
 core/target/
 **/target/
+dist/
 
 # macOS clutter
 .DS_Store
