@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var lastPopoverClosedAt: Date = .distantPast
     private var popoverGlobalMonitor: Any?
     private var popoverLocalMonitor: Any?
+    private var lastStatusState: MenuBarShieldState?
+    private var lastStatusText: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let radarOnly = CommandLine.arguments.contains("--radar-only")
@@ -54,10 +56,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             applyStatusButtonFromSnapshot(viewModel.snapshot, purity: viewModel.purity)
         }
 
-        DispatchQueue.main.async { [weak self] in
-            _ = self?.ensurePopover()
-        }
-
         viewModel.onStatusChange = { [weak self] snap, purity in
             guard let self = self else { return }
             self.applyStatusButtonFromSnapshot(snap, purity: purity)
@@ -80,7 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             self.dashboardController.show(viewModel: self.viewModel, section: section, isFirstRun: isFirstRun)
         }
 
-        viewModel.startMonitoring()
+        let willShowConsole = RustCoreBridge.needsInitialSetup || !radarOnly
+        viewModel.startMonitoring(initialFullProbe: willShowConsole)
         hasCompletedInitialLaunch = true
 
         if RustCoreBridge.needsInitialSetup {
@@ -88,6 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         } else if !radarOnly {
             dashboardController.show(viewModel: viewModel, section: .radar, isFirstRun: false)
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        CoreWorkerClient.shared.shutdown()
     }
 
     private func ensurePopover() -> NSPopover {
@@ -127,6 +130,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         teardownPopoverMonitors()
         lastPopoverClosedAt = Date()
+        viewModel.setPopoverVisible(false)
+        // Release hidden SwiftUI view tree so closed menu bar radar uses zero background CPU/GPU
+        popover?.contentViewController = nil
+        hostingController = nil
+        popover = nil
     }
 
     private func installPopoverMonitors() {
@@ -188,7 +196,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func updateStatusButton(state: MenuBarShieldState, text: String) {
+        if lastStatusState == state && lastStatusText == text {
+            return
+        }
         guard let button = statusItem.button else { return }
+        lastStatusState = state
+        lastStatusText = text
         button.image = ShieldBrandGraphics.makeMenuBarIcon(state: state)
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .medium)
         let attrs: [NSAttributedString.Key: Any] = [
@@ -201,11 +214,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func showPopoverNow() {
         guard let button = statusItem.button else { return }
         let pop = ensurePopover()
+        viewModel.setPopoverVisible(true)
         NSApp.activate(ignoringOtherApps: true)
         pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         pop.contentViewController?.view.window?.makeKey()
         installPopoverMonitors()
-        viewModel.refresh(force: false)
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {

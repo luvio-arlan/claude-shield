@@ -50,9 +50,21 @@ enum RustCoreBridge {
         }
     }
 
-    static func fetchTelemetry() -> TelemetrySnapshot? {
-        guard let data = runCore(["telemetry"]) else { return nil }
+    static func fetchTelemetry(mode: TelemetryProbeMode = .full, resetPool: Bool = false) -> TelemetrySnapshot? {
+        if let snap = CoreWorkerClient.shared.fetchTelemetry(mode: mode, resetPool: resetPool) {
+            return snap
+        }
+        let args = mode == .light ? ["telemetry", "--light"] : ["telemetry"]
+        guard let data = runCore(args) else { return nil }
         return try? JSONDecoder().decode(TelemetrySnapshot.self, from: data)
+    }
+
+    static func fetchLocalDefenses() -> LocalDefenseModel? {
+        if let defenses = CoreWorkerClient.shared.fetchDefenses() {
+            return defenses
+        }
+        guard let data = runCore(["defenses"]) else { return nil }
+        return try? JSONDecoder().decode(LocalDefenseModel.self, from: data)
     }
 
     static func fetchPurity() -> PurityReport? {
@@ -68,9 +80,16 @@ enum RustCoreBridge {
         return try? JSONDecoder().decode(PatrolReportModel.self, from: data)
     }
 
-    static func fetchGate() -> GateResultModel? {
+    static func fetchGate(resetPool: Bool = false) -> GateResultModel? {
+        if let gate = CoreWorkerClient.shared.fetchGate(resetPool: resetPool) {
+            return gate
+        }
         guard let data = runCore(["gate", "--json"]) else { return nil }
         return try? JSONDecoder().decode(GateResultModel.self, from: data)
+    }
+
+    static func resetWorkerPool() {
+        CoreWorkerClient.shared.resetPool()
     }
 
     static func loadLastLaunchIP() -> String? {

@@ -82,6 +82,14 @@ def check_swift_guardrails(errors: list[str]) -> None:
 
     for p in files:
         text = p.read_text(encoding="utf-8")
+        if ".repeatForever(" in text and ("disablesAnimations = true" not in text or ".onDisappear" not in text):
+            errors.append(
+                fail(
+                    "NO_UNGATED_REPEAT_FOREVER",
+                    f"Found ungated `.repeatForever(` animation in app/Sources/{p.name}.",
+                    "Gate repeating SwiftUI animations on view visibility and cancel via `disablesAnimations = true` in `.onDisappear` so hidden windows consume 0% CPU.",
+                )
+            )
         for pat in ("fatalError(", "try!", " as! "):
             if pat in text:
                 errors.append(
@@ -91,6 +99,31 @@ def check_swift_guardrails(errors: list[str]) -> None:
                         "Handle errors explicitly or return a safe fallback instead of crashing the resident menu bar app.",
                     )
                 )
+
+    app_delegate_path = APP_SOURCES_DIR / "AppDelegate.swift"
+    if app_delegate_path.exists():
+        delegate_text = app_delegate_path.read_text(encoding="utf-8")
+        if "hostingController = nil" not in delegate_text:
+            errors.append(
+                fail(
+                    "POPOVER_TEARDOWN_ON_CLOSE",
+                    "AppDelegate.swift does not release `hostingController = nil` when the popover closes.",
+                    "Tear down the hidden SwiftUI NSHostingController in popoverDidClose to eliminate idle CPU and memory footprint.",
+                )
+            )
+        launch_block = re.search(
+            r"func applicationDidFinishLaunching\(.*?\n    \}",
+            delegate_text,
+            re.S,
+        )
+        if launch_block and "ensurePopover()" in launch_block.group(0):
+            errors.append(
+                fail(
+                    "NO_PREWARM_HIDDEN_POPOVER",
+                    "Found `ensurePopover()` pre-warming inside applicationDidFinishLaunching.",
+                    "Lazily construct NSPopover on user click so `--radar-only` launches with zero hidden SwiftUI view trees.",
+                )
+            )
 
     if UPDATER_SWIFT.exists():
         updater_text = UPDATER_SWIFT.read_text(encoding="utf-8")
@@ -118,6 +151,15 @@ def check_swift_guardrails(errors: list[str]) -> None:
 
 
 def check_rust_guardrails(errors: list[str]) -> None:
+    main_rs = ROOT / "core" / "src" / "main.rs"
+    if main_rs.exists() and 'flavor = "current_thread"' not in main_rs.read_text(encoding="utf-8"):
+        errors.append(
+            fail(
+                "SINGLE_THREAD_TOKIO_CORE",
+                "core/src/main.rs does not configure single-threaded Tokio (`flavor = \"current_thread\"`).",
+                "Use `#[tokio::main(flavor = \"current_thread\")]` to avoid spawning idle multi-thread worker pools in a lightweight daemon.",
+            )
+        )
     for path in rust_files():
         rel = path.relative_to(ROOT).as_posix()
         text = path.read_text(encoding="utf-8")

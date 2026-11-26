@@ -24,6 +24,8 @@ final class ShieldViewModel: ObservableObject {
     @Published var loginAutoStart: Bool = false
     @Published var toastMessage: String?
     @Published var updatePhase: AppUpdatePhase = .idle
+    @Published private(set) var isPopoverVisible: Bool = false
+    @Published private(set) var isDashboardVisible: Bool = false
     @Published var dismissedUpdateVersion: String? {
         didSet {
             if let v = dismissedUpdateVersion {
@@ -50,10 +52,16 @@ final class ShieldViewModel: ObservableObject {
     private var purityTimer: Timer?
     private var updateTimer: Timer?
     private var pathMonitor: NWPathMonitor?
-    private var wakeObserver: NSObjectProtocol?
-    private var lastNetworkStatus: NWPath.Status?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var lastPathSignature: String?
     private var consecutiveUnreachableCount = 0
     private var lastRefreshAt: Date?
+    private var lastFullRefreshAt: Date?
+    private var currentTimerInterval: TimeInterval?
+    private var isSystemAsleep: Bool = false
+    private var isAuditingDefenses: Bool = false
+
+    var isUIVisible: Bool { isPopoverVisible || isDashboardVisible }
 
     init() {
         self.autoKillOnBreach = UserDefaults.standard.object(forKey: "autoKillOnBreach") as? Bool ?? true
@@ -69,62 +77,212 @@ final class ShieldViewModel: ObservableObject {
         purityTimer?.invalidate()
         updateTimer?.invalidate()
         pathMonitor?.cancel()
-        if let observer = wakeObserver {
+        for observer in workspaceObservers {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
     }
 
-    func startMonitoring() {
-        refresh(force: true)
-
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh(force: false) }
+    func setPopoverVisible(_ visible: Bool) {
+        guard isPopoverVisible != visible else { return }
+        isPopoverVisible = visible
+        rescheduleTimer()
+        if visible {
+            let needsFull = lastFullRefreshAt.map { Date().timeIntervalSince($0) >= 4.0 } ?? true
+            if needsFull {
+                refresh(force: true, mode: .full)
+            }
         }
+    }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
-            self?.refreshPurity(silent: true)
+    func setDashboardVisible(_ visible: Bool) {
+        guard isDashboardVisible != visible else { return }
+        isDashboardVisible = visible
+        rescheduleTimer()
+        if visible {
+            let needsFull = lastFullRefreshAt.map { Date().timeIntervalSince($0) >= 4.0 } ?? true
+            if needsFull {
+                refresh(force: true, mode: .full)
+            }
+        }
+    }
+
+    private func desiredTimerInterval() -> TimeInterval? {
+        if isSystemAsleep {
+            return nil
+        }
+        if isUIVisible {
+            return 15.0
+        }
+        if snapshot.desktopRunning || !snapshot.isSafe {
+            return 25.0
+        }
+        return 60.0
+    }
+
+    private func rescheduleTimer() {
+        let target = desiredTimerInterval()
+        if target == currentTimerInterval {
+            return
+        }
+        timer?.invalidate()
+        timer = nil
+        currentTimerInterval = target
+
+        guard let interval = target else { return }
+        let newTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self, !self.isSystemAsleep else { return }
+                let mode: TelemetryProbeMode = self.isUIVisible ? .full : .light
+                self.refresh(force: false, mode: mode)
+            }
+        }
+        newTimer.tolerance = interval * 0.2
+        timer = newTimer
+    }
+
+    nonisolated private static func isClaudeDesktopNotification(_ notification: Notification) -> Bool {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+            return false
+        }
+        if app.bundleIdentifier == "com.anthropic.claudefordesktop" { return true }
+        if app.bundleURL?.lastPathComponent == "Claude.app" { return true }
+        if app.executableURL?.lastPathComponent == "Claude" { return true }
+        return app.localizedName == "Claude"
+    }
+
+    func startMonitoring(initialFullProbe: Bool = false) {
+        refresh(force: true, mode: initialFullProbe ? .full : .light)
+        rescheduleTimer()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            guard let self = self else { return }
+            if self.purity == nil {
+                self.refreshPurity(silent: true)
+            }
         }
         purityTimer?.invalidate()
-        purityTimer = Timer.scheduledTimer(withTimeInterval: 14400.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.runFullCheckup(silent: true) }
+        let pTimer = Timer.scheduledTimer(withTimeInterval: 14400.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self, !self.isSystemAsleep else { return }
+                self.runFullCheckup(silent: true)
+            }
         }
+        pTimer.tolerance = 600.0
+        purityTimer = pTimer
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
             self?.checkForUpdates(manual: false)
         }
         updateTimer?.invalidate()
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 21600.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.checkForUpdates(manual: false) }
+        let uTimer = Timer.scheduledTimer(withTimeInterval: 21600.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self, !self.isSystemAsleep else { return }
+                self.checkForUpdates(manual: false)
+            }
         }
+        uTimer.tolerance = 900.0
+        updateTimer = uTimer
 
-        if let existingObserver = wakeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(existingObserver)
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        for existing in workspaceObservers {
+            wsCenter.removeObserver(existing)
         }
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification,
+        workspaceObservers.removeAll()
+
+        let launchObs = wsCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] note in
+            guard Self.isClaudeDesktopNotification(note) else { return }
             Task { @MainActor in
-                self?.consecutiveUnreachableCount = 0
-                self?.refresh(force: true)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                    self?.refresh(force: true)
+                self?.auditDefensesImmediately()
+            }
+        }
+
+        let terminateObs = wsCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard Self.isClaudeDesktopNotification(note) else { return }
+            Task { @MainActor in
+                self?.auditDefensesImmediately()
+            }
+        }
+
+        let sleepHandler: @Sendable (Notification) -> Void = { [weak self] _ in
+            Task { @MainActor in
+                self?.isSystemAsleep = true
+                self?.rescheduleTimer()
+            }
+        }
+        let willSleepObs = wsCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main,
+            using: sleepHandler
+        )
+        let screenSleepObs = wsCenter.addObserver(
+            forName: NSWorkspace.screensDidSleepNotification,
+            object: nil,
+            queue: .main,
+            using: sleepHandler
+        )
+
+        let wakeHandler: @Sendable (Notification) -> Void = { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self else { return }
+                let wasAsleep = self.isSystemAsleep
+                self.isSystemAsleep = false
+                self.consecutiveUnreachableCount = 0
+                self.rescheduleTimer()
+                let mode: TelemetryProbeMode = self.isUIVisible ? .full : .light
+                self.refresh(force: true, mode: mode, resetPool: true)
+                if wasAsleep {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                        guard let self = self, !self.isSystemAsleep else { return }
+                        self.refresh(force: true, mode: self.isUIVisible ? .full : .light)
+                    }
                 }
             }
         }
+        let didWakeObs = wsCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main,
+            using: wakeHandler
+        )
+        let screenWakeObs = wsCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification,
+            object: nil,
+            queue: .main,
+            using: wakeHandler
+        )
+
+        workspaceObservers = [
+            launchObs,
+            terminateObs,
+            willSleepObs,
+            screenSleepObs,
+            didWakeObs,
+            screenWakeObs
+        ]
 
         pathMonitor?.cancel()
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
+            let interfaces = path.availableInterfaces.map(\.name).sorted().joined(separator: ",")
+            let sig = "\(path.status)|\(interfaces)|\(path.isExpensive)|\(path.isConstrained)"
             Task { @MainActor in
                 guard let self = self else { return }
-                let changed = self.lastNetworkStatus != nil && self.lastNetworkStatus != path.status
-                self.lastNetworkStatus = path.status
-                if changed {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                        self.refresh(force: true)
+                let changed = self.lastPathSignature != nil && self.lastPathSignature != sig
+                self.lastPathSignature = sig
+                if changed && !self.isSystemAsleep {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                        guard let self = self, !self.isSystemAsleep else { return }
+                        let mode: TelemetryProbeMode = self.isUIVisible ? .full : .light
+                        self.refresh(force: true, mode: mode, resetPool: true)
                     }
                 }
             }
@@ -133,21 +291,58 @@ final class ShieldViewModel: ObservableObject {
         self.pathMonitor = monitor
     }
 
-    func refresh(force: Bool = false) {
+    func auditDefensesImmediately() {
+        guard !isAuditingDefenses else { return }
+        isAuditingDefenses = true
+        Task.detached(priority: .userInitiated) {
+            let defenses = RustCoreBridge.fetchLocalDefenses()
+            await MainActor.run {
+                self.isAuditingDefenses = false
+                guard let defenses = defenses else { return }
+                let updated = self.snapshot.replacingDefenses(defenses)
+                self.snapshot = updated
+                self.loginAutoStart = defenses.login_item_enabled
+                self.onStatusChange?(updated, self.purity)
+                self.rescheduleTimer()
+
+                if defenses.original_app_exposed && defenses.hideOriginalPreference {
+                    Task.detached(priority: .utility) {
+                        _ = RustCoreBridge.hideOriginalApp()
+                    }
+                }
+
+                if self.autoKillOnBreach {
+                    if updated.desktopUnprotected {
+                        self.emergencyKillClaude(reason: "检测到未绑定硬代理或未禁 QUIC/WebRTC 的 Claude 桌面版进程（#\(defenses.desktop_pid ?? "?")），已即时熔断急停防裸连！")
+                    } else if updated.hasUnprotectedCLI {
+                        self.killUnprotectedCLI(pids: defenses.unprotected_cli_pids)
+                    }
+                }
+            }
+        }
+    }
+
+    func refresh(force: Bool = false, mode: TelemetryProbeMode? = nil, resetPool: Bool = false) {
         guard !isRefreshing else { return }
+        let resolvedMode: TelemetryProbeMode = mode ?? ((isUIVisible || force) ? .full : .light)
         if !force, let last = lastRefreshAt, Date().timeIntervalSince(last) < 4.0 {
             return
         }
         lastRefreshAt = Date()
+        if resolvedMode == .full {
+            lastFullRefreshAt = Date()
+        }
         isRefreshing = true
-        Task.detached(priority: .userInitiated) {
-            let result = RustCoreBridge.fetchTelemetry()
+        let priority: TaskPriority = isUIVisible || force ? .userInitiated : .utility
+        Task.detached(priority: priority) {
+            let result = RustCoreBridge.fetchTelemetry(mode: resolvedMode, resetPool: resetPool)
             await MainActor.run {
                 self.isRefreshing = false
                 guard let result = result else { return }
                 self.snapshot = result
                 self.loginAutoStart = result.defenses.login_item_enabled
                 self.onStatusChange?(result, self.purity)
+                self.rescheduleTimer()
 
                 if result.defenses.original_app_exposed && result.defenses.hideOriginalPreference {
                     Task.detached(priority: .utility) {
@@ -174,7 +369,7 @@ final class ShieldViewModel: ObservableObject {
                             self.emergencyKillClaude(reason: "连续检测到代理/TUN 通道中断，已自动急停 Claude 桌面版（Fail-Closed）！")
                         } else {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                                self.refresh(force: true)
+                                self.refresh(force: true, mode: .light, resetPool: true)
                             }
                         }
                     }
@@ -445,177 +640,7 @@ final class ShieldViewModel: ObservableObject {
         }
     }
 
-    func copyDiagnosticScreenshot(_ pngData: Data?) {
-        guard let pngData = pngData, let image = NSImage(data: pngData) else {
-            showToast("截图生成失败，请重试")
-            return
-        }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        let item = NSPasteboardItem()
-        item.setData(pngData, forType: .png)
-        if let tiff = image.tiffRepresentation {
-            item.setData(tiff, forType: .tiff)
-        }
-        pb.writeObjects([item])
-        showToast("2x 高清诊断截图已复制，可直接 ⌘V 粘贴")
-    }
-
-    func openSetupWizard(isFirstRun: Bool = false) {
-        openDashboard(section: .settings, isFirstRun: isFirstRun)
-    }
-
-    func openDashboard(section: ShieldDashboardSection = .radar, isFirstRun: Bool = false) {
-        onRequestClosePopover?()
-        onShowDashboard?(section, isFirstRun)
-    }
-
-    func checkForUpdates(manual: Bool = false) {
-        guard !updatePhase.isBusy else { return }
-        if manual {
-            updatePhase = .checking
-        }
-        let proxyPort = snapshot.proxy_port
-        Task.detached(priority: manual ? .userInitiated : .utility) {
-            do {
-                let info = try await GitHubUpdater.checkLatestRelease(proxyPort: proxyPort)
-                await MainActor.run {
-                    if let info = info {
-                        if manual {
-                            self.dismissedUpdateVersion = nil
-                        }
-                        self.updatePhase = .available(info)
-                        self.onStatusChange?(self.snapshot, self.purity)
-                        if manual {
-                            self.showToast("发现新版本 \(info.tagName)，可一键更新")
-                        }
-                    } else if manual {
-                        self.updatePhase = .upToDate(AppReleaseConfig.shortDisplayVersion)
-                        self.showToast("当前已是最新版本 \(AppReleaseConfig.shortDisplayVersion)")
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    if manual {
-                        let msg = (error as? LocalizedError)?.errorDescription ?? "检查更新失败，请确认网络连接"
-                        self.updatePhase = .failed(msg)
-                        self.showToast(msg)
-                    }
-                }
-            }
-        }
-    }
-
-    func performUpdate(_ info: AppUpdateInfo) {
-        guard !updatePhase.isBusy else { return }
-        if info.zipDownloadURL == nil {
-            NSWorkspace.shared.open(info.htmlURL)
-            return
-        }
-        let proxyPort = snapshot.proxy_port
-        updatePhase = .downloading(info, 0.0)
-        Task.detached(priority: .userInitiated) {
-            do {
-                try await GitHubUpdater.downloadAndInstall(
-                    info: info,
-                    proxyPort: proxyPort,
-                    onProgress: { progress in
-                        Task { @MainActor in
-                            self.updatePhase = .downloading(info, progress)
-                        }
-                    },
-                    onStage: { stage in
-                        Task { @MainActor in
-                            self.updatePhase = .installing(info, stage)
-                        }
-                    }
-                )
-                await MainActor.run {
-                    NSApp.terminate(nil)
-                }
-            } catch {
-                await MainActor.run {
-                    let msg = (error as? LocalizedError)?.errorDescription ?? "更新失败：\(error.localizedDescription)"
-                    self.updatePhase = .failed(msg)
-                    self.showToast(msg)
-                }
-            }
-        }
-    }
-
-    func dismissUpdateBanner(_ version: String) {
-        dismissedUpdateVersion = version
-        onStatusChange?(snapshot, purity)
-    }
-
-    func openReleasePage(_ url: URL) {
-        NSWorkspace.shared.open(url)
-    }
-
-    func confirmAndUninstall() {
-        onRequestClosePopover?()
-        NSApp.activate(ignoringOtherApps: true)
-
-        let confirm = NSAlert()
-        confirm.alertStyle = .warning
-        confirm.messageText = "确认一键卸载并还原系统环境？"
-        confirm.informativeText = """
-        Claude Shield 将为您完整还原以下所有本地修改：
-
-        • 将隐藏隔离仓中的原版 Claude.app 还原至 /Applications，并恢复启动台 / Spotlight 图标
-        • 移除 Claude Code CLI 代理门禁与 OAuth 系统浏览器弹窗拦截器
-        • 还原 ~/.claude/settings.json 中的时区 / 语言 / 遥测 / 沙盒注入项（保留您原有配置）
-        • 关闭并清理开机自启雷达与每日自动巡检任务
-        • 清理 ~/.config/claude-guard 本地配置与缓存，并将 Claude Shield.app 移至废纸篓
-        """
-        confirm.addButton(withTitle: "一键卸载并还原")
-        confirm.addButton(withTitle: "取消")
-        if let firstBtn = confirm.buttons.first {
-            firstBtn.hasDestructiveAction = true
-        }
-
-        guard confirm.runModal() == .alertFirstButtonReturn else { return }
-
-        Task.detached(priority: .userInitiated) {
-            let report = RustCoreBridge.runUninstall()
-            var trashedApp = false
-            let bundleURL = Bundle.main.bundleURL
-            if bundleURL.pathExtension == "app" && FileManager.default.fileExists(atPath: bundleURL.path) {
-                do {
-                    try FileManager.default.trashItem(at: bundleURL, resultingItemURL: nil)
-                    trashedApp = true
-                } catch {
-                    trashedApp = false
-                }
-            }
-
-            let didTrashApp = trashedApp
-            await MainActor.run {
-                var items = report?.restored ?? ["已清理 Claude Shield 本地防护配置"]
-                if didTrashApp {
-                    items.append("已将 Claude Shield.app 移至废纸篓")
-                }
-                let listText = items.map { "✅ \($0)" }.joined(separator: "\n")
-                let warnText: String
-                if let warns = report?.warnings, !warns.isEmpty {
-                    warnText = "\n\n注意：\n" + warns.map { "⚠️ \($0)" }.joined(separator: "\n")
-                } else {
-                    warnText = ""
-                }
-
-                let done = NSAlert()
-                done.alertStyle = .informational
-                done.messageText = "Claude Shield 已卸载并完全还原"
-                done.informativeText = "\(listText)\(warnText)\n\n您的原版 Claude 应用、终端命令与系统环境均已恢复至安装前状态。"
-                done.addButton(withTitle: "知道了")
-                NSApp.activate(ignoringOtherApps: true)
-                done.runModal()
-                NSApplication.shared.terminate(nil)
-            }
-        }
-    }
-
-    private func showToast(_ msg: String) {
+    func showToast(_ msg: String) {
         withAnimation(.easeInOut(duration: 0.2)) {
             toastMessage = msg
         }

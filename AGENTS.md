@@ -3,9 +3,9 @@
 ## 1. Architecture Map
 
 - `core/src/` — Modular Native Rust engine (`claude-shield-core`), every module `<= 800` lines:
-  - `main.rs`, `config.rs`, `probe.rs`, `guard.rs`, `purity.rs`, `purity_score.rs`, `patrol.rs`, `detect.rs`, `setup.rs`, `uninstall.rs`.
+  - `main.rs`, `config.rs`, `probe.rs`, `proc_audit.rs`, `worker.rs`, `guard.rs`, `purity.rs`, `purity_score.rs`, `patrol.rs`, `detect.rs`, `setup.rs`, `uninstall.rs`.
 - `app/Sources/` — Modular macOS 13+ SwiftUI + AppKit client, every file `<= 800` lines:
-  - `Models.swift`, `RustCoreBridge.swift`, `Updater.swift`, `ShieldViewModel.swift`, `ThemeAndComponents.swift`, `PopoverView.swift`, `PopoverSections.swift`, `LaunchGuardView.swift`, `DashboardState.swift`, `DashboardView.swift`, `DashboardRadarSection.swift`, `DashboardPuritySection.swift`, `DashboardSettingsSection.swift`, `AppDelegate.swift`, `main.swift`.
+  - `Models.swift`, `CoreWorkerClient.swift`, `RustCoreBridge.swift`, `Updater.swift`, `ShieldViewModel.swift`, `ShieldViewModelActions.swift`, `ThemeAndComponents.swift`, `PopoverView.swift`, `PopoverSections.swift`, `LaunchGuardView.swift`, `DashboardState.swift`, `DashboardView.swift`, `DashboardRadarSection.swift`, `DashboardPuritySection.swift`, `DashboardSettingsSection.swift`, `AppDelegate.swift`, `main.swift`.
 - `scripts/check.sh` — **Single source of truth** quality gate (local + `.github/workflows/ci.yml`).
 - `scripts/garden-guard.py` — L2/L3 deterministic guardrails: Swift/Rust invariants, Rust↔Swift DTO parity, version parity, framework sync, shell syntax, and zero-ratchet `<= 800`-line enforcement.
 - `scripts/build-release.sh` — Builds release Rust binary, compiles & signs `Claude Shield.app`, and packages DMG/ZIP (version derived from `core/Cargo.toml`).

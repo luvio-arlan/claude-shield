@@ -41,13 +41,16 @@ struct SnappyButtonStyle: ButtonStyle {
     }
 }
 
-enum MenuBarShieldState {
+enum MenuBarShieldState: Hashable {
     case loading
     case armed
     case alert
 }
 
 enum ShieldBrandGraphics {
+    private static var menuBarIconCache: [MenuBarShieldState: NSImage] = [:]
+    private static var badgeEmblemCache: [String: NSImage] = [:]
+
     private static let sparkTemplateCG: CGImage? = {
         let candidates: [URL?] = [
             Bundle.main.url(forResource: "claude-spark-template", withExtension: "png"),
@@ -171,6 +174,9 @@ enum ShieldBrandGraphics {
     }
 
     static func makeMenuBarIcon(state: MenuBarShieldState) -> NSImage {
+        if let cached = menuBarIconCache[state] {
+            return cached
+        }
         let size = NSSize(width: 18, height: 18)
         let image = NSImage(size: size, flipped: false) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
@@ -253,10 +259,15 @@ enum ShieldBrandGraphics {
             return true
         }
         image.isTemplate = false
+        menuBarIconCache[state] = image
         return image
     }
 
     static func makePopoverBadgeEmblem(isSafe: Bool, isDark: Bool) -> NSImage {
+        let cacheKey = "\(isSafe)-\(isDark)"
+        if let cached = badgeEmblemCache[cacheKey] {
+            return cached
+        }
         let ptSize: CGFloat = 38
         let scale: CGFloat = 3
         let pxSize = Int(ptSize * scale)
@@ -334,7 +345,9 @@ enum ShieldBrandGraphics {
         guard let cg = ctx.makeImage() else {
             return NSImage(size: NSSize(width: ptSize, height: ptSize))
         }
-        return NSImage(cgImage: cg, size: NSSize(width: ptSize, height: ptSize))
+        let img = NSImage(cgImage: cg, size: NSSize(width: ptSize, height: ptSize))
+        badgeEmblemCache[cacheKey] = img
+        return img
     }
 }
 
@@ -342,7 +355,22 @@ struct ShieldStatusBadge: View {
     let isSafe: Bool
     let accentColor: Color
     let isDark: Bool
+    var isActive: Bool = true
     @StateObject private var pulseState = LocalState(false)
+
+    private func syncPulseAnimation(active: Bool) {
+        if active {
+            withAnimation(.easeInOut(duration: 1.9).repeatForever(autoreverses: true)) {
+                pulseState.value = true
+            }
+        } else {
+            var tx = Transaction()
+            tx.disablesAnimations = true
+            withTransaction(tx) {
+                pulseState.value = false
+            }
+        }
+    }
 
     var body: some View {
         let ringOpacity = pulseState.value ? (isDark ? 0.24 : 0.16) : (isDark ? 0.09 : 0.06)
@@ -392,9 +420,13 @@ struct ShieldStatusBadge: View {
                 .offset(x: 15.5, y: 15.5)
         }
         .onAppear {
-            withAnimation(.easeInOut(duration: 1.9).repeatForever(autoreverses: true)) {
-                pulseState.value = true
-            }
+            syncPulseAnimation(active: isActive)
+        }
+        .onChange(of: isActive) { active in
+            syncPulseAnimation(active: active)
+        }
+        .onDisappear {
+            syncPulseAnimation(active: false)
         }
     }
 }

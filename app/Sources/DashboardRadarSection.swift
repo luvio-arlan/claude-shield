@@ -16,7 +16,12 @@ extension ShieldDashboardView {
 
         return VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 16) {
-                ShieldStatusBadge(isSafe: vm.snapshot.isSafe, accentColor: accentColor, isDark: isDark)
+                ShieldStatusBadge(
+                    isSafe: vm.snapshot.isSafe,
+                    accentColor: accentColor,
+                    isDark: isDark,
+                    isActive: vm.isDashboardVisible
+                )
 
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 8.5) {
@@ -300,7 +305,12 @@ extension ShieldDashboardView {
     private func copyDashboardSnapshotImage() {
         let card = VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                ShieldStatusBadge(isSafe: vm.snapshot.isSafe, accentColor: accentColor, isDark: isDark)
+                ShieldStatusBadge(
+                    isSafe: vm.snapshot.isSafe,
+                    accentColor: accentColor,
+                    isDark: isDark,
+                    isActive: false
+                )
                 VStack(alignment: .leading, spacing: 3) {
                     Text(vm.snapshot.isSafe ? "SHIELD ARMED" : "IP 异常预警")
                         .font(.system(size: 14, weight: .bold, design: .rounded))

@@ -178,6 +178,7 @@ final class ShieldDashboardWindowController: NSObject, NSWindowDelegate {
     private var wizardState: SetupWizardState?
     private weak var boundViewModel: ShieldViewModel?
     private var isHiding = false
+    private var savedWindowFrame: NSRect?
 
     var currentSection: ShieldDashboardSection {
         navState.selectedSection
@@ -194,6 +195,7 @@ final class ShieldDashboardWindowController: NSObject, NSWindowDelegate {
         navState.selectedSection = section
         isHiding = false
         setDockVisible(true)
+        viewModel.setDashboardVisible(true)
 
         if let existing = window, boundViewModel === viewModel {
             if isFirstRun {
@@ -213,7 +215,6 @@ final class ShieldDashboardWindowController: NSObject, NSWindowDelegate {
             } else {
                 presentSmoothly(existing)
             }
-            viewModel.refresh(force: false)
             return
         }
 
@@ -260,7 +261,9 @@ final class ShieldDashboardWindowController: NSObject, NSWindowDelegate {
         win.delegate = self
         win.suppressAutoFocusUntil = Date().addingTimeInterval(0.24)
 
-        if let screen = NSScreen.main ?? NSScreen.screens.first {
+        if let restored = savedWindowFrame {
+            win.setFrame(restored, display: true)
+        } else if let screen = NSScreen.main ?? NSScreen.screens.first {
             let vf = screen.visibleFrame
             let w = min(980, vf.width - 64)
             let h = min(752, vf.height - 48)
@@ -281,23 +284,30 @@ final class ShieldDashboardWindowController: NSObject, NSWindowDelegate {
         presentSmoothly(win)
     }
 
+    private func releaseHiddenWindow(_ win: ShieldDashboardWindow) {
+        savedWindowFrame = win.frame
+        win.orderOut(nil)
+        win.alphaValue = 1.0
+        win.delegate = nil
+        win.contentViewController = nil
+        if self.window === win {
+            self.window = nil
+        }
+        self.wizardState = nil
+        boundViewModel?.setDashboardVisible(false)
+        setDockVisible(false)
+    }
+
     func hideToMenuBar(animated: Bool = true, completion: (() -> Void)? = nil) {
         guard let win = window, win.isVisible || win.isMiniaturized else {
+            boundViewModel?.setDashboardVisible(false)
             setDockVisible(false)
             completion?()
             return
         }
-        if win.isMiniaturized {
-            win.orderOut(nil)
-            setDockVisible(false)
-            completion?()
-            return
-        }
-        guard animated else {
+        if win.isMiniaturized || !animated {
             isHiding = false
-            win.orderOut(nil)
-            win.alphaValue = 1.0
-            setDockVisible(false)
+            releaseHiddenWindow(win)
             completion?()
             return
         }
@@ -319,9 +329,7 @@ final class ShieldDashboardWindowController: NSObject, NSWindowDelegate {
                     return
                 }
                 self.isHiding = false
-                win.orderOut(nil)
-                win.alphaValue = 1.0
-                self.setDockVisible(false)
+                self.releaseHiddenWindow(win)
                 completion?()
             }
         })
@@ -332,8 +340,13 @@ final class ShieldDashboardWindowController: NSObject, NSWindowDelegate {
         return false
     }
 
+    func windowDidMiniaturize(_ notification: Notification) {
+        boundViewModel?.setDashboardVisible(false)
+    }
+
     func windowDidDeminiaturize(_ notification: Notification) {
         guard let win = window else { return }
+        boundViewModel?.setDashboardVisible(true)
         win.alphaValue = 1.0
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

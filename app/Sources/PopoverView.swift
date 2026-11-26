@@ -150,7 +150,12 @@ struct ShieldPopoverView: View {
 
     var headerCard: some View {
         HStack(spacing: 11) {
-            ShieldStatusBadge(isSafe: vm.snapshot.isSafe, accentColor: accentColor, isDark: isDark)
+            ShieldStatusBadge(
+                isSafe: vm.snapshot.isSafe,
+                accentColor: accentColor,
+                isDark: isDark,
+                isActive: vm.isPopoverVisible
+            )
 
             VStack(alignment: .leading, spacing: 3.5) {
                 HStack(spacing: 6) {

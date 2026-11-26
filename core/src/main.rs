@@ -3,17 +3,22 @@ mod detect;
 mod guard;
 mod patrol;
 mod probe;
+mod proc_audit;
 mod purity;
 mod purity_score;
 mod setup;
 mod uninstall;
+mod worker;
 
 use chrono::Local;
 use config::{tz_short_and_full, ShieldConfig};
 use detect::detect_environment;
 use guard::{audit_local_defenses, escape_applescript, hide_original_claude_app, kill_claude_desktop, LocalDefenseAudit};
 use patrol::run_daily_patrol;
-use probe::{full_telemetry_probe, quick_gate_probe, ApiLatencyMetrics, ChannelProbe};
+use probe::{
+    full_telemetry_probe, light_telemetry_probe, quick_gate_probe, ApiLatencyMetrics, ChannelProbe,
+    NetworkProbeResult,
+};
 use purity::run_purity_audit;
 use serde::Serialize;
 use setup::{run_setup, SetupOptions};
@@ -24,34 +29,34 @@ use std::process::{Command, Stdio};
 use uninstall::run_uninstall;
 
 #[derive(Serialize)]
-struct TelemetryJson {
-    expected_ip: String,
-    proxy_port: u16,
-    target_tz: String,
-    region_short: String,
-    region_full: String,
-    proxy: ChannelProbe,
-    tun: ChannelProbe,
-    claude_edge: ChannelProbe,
-    api_latency: ApiLatencyMetrics,
-    defenses: LocalDefenseAudit,
-    checked_at: String,
+pub(crate) struct TelemetryJson {
+    pub(crate) expected_ip: String,
+    pub(crate) proxy_port: u16,
+    pub(crate) target_tz: String,
+    pub(crate) region_short: String,
+    pub(crate) region_full: String,
+    pub(crate) proxy: ChannelProbe,
+    pub(crate) tun: ChannelProbe,
+    pub(crate) claude_edge: ChannelProbe,
+    pub(crate) api_latency: ApiLatencyMetrics,
+    pub(crate) defenses: LocalDefenseAudit,
+    pub(crate) checked_at: String,
 }
 
 #[derive(Serialize)]
-struct GateJson {
-    ok: bool,
-    error: Option<String>,
-    expected_ip: String,
-    proxy_ip: String,
-    tun_ip: String,
-    claude_edge_ip: String,
-    claude_loc: Option<String>,
-    claude_colo: Option<String>,
-    elapsed_ms: u64,
+pub(crate) struct GateJson {
+    pub(crate) ok: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) expected_ip: String,
+    pub(crate) proxy_ip: String,
+    pub(crate) tun_ip: String,
+    pub(crate) claude_edge_ip: String,
+    pub(crate) claude_loc: Option<String>,
+    pub(crate) claude_colo: Option<String>,
+    pub(crate) elapsed_ms: u64,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = env::args().collect();
     let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("help");
@@ -59,7 +64,15 @@ async fn main() {
     let cfg = ShieldConfig::load();
 
     match subcmd {
-        "telemetry" => cmd_telemetry(&cfg).await,
+        "worker" => worker::run_worker_loop().await,
+        "telemetry" => {
+            let light = args.iter().any(|a| a == "--light");
+            cmd_telemetry(&cfg, light).await;
+        }
+        "defenses" => {
+            let defenses = audit_local_defenses(&cfg);
+            println!("{}", serde_json::to_string(&defenses).unwrap_or_default());
+        }
         "gate" => cmd_gate(&cfg, json_mode).await,
         "purity" => cmd_purity(&cfg, json_mode).await,
         "patrol" => {
@@ -169,7 +182,7 @@ async fn main() {
         }
         _ => {
             println!("Claude Shield Core v{} (Native Rust Engine)", env!("CARGO_PKG_VERSION"));
-            println!("Usage: claude-shield-core <telemetry|gate|purity|patrol|hide-original|detect|setup|uninstall|exec-cli|launch-desktop> [--json]");
+            println!("Usage: claude-shield-core <worker|telemetry|defenses|gate|purity|patrol|hide-original|detect|setup|uninstall|exec-cli|launch-desktop> [--json]");
         }
     }
 }
@@ -178,19 +191,15 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
-async fn cmd_telemetry(cfg: &ShieldConfig) {
-    let (net, defenses) = tokio::join!(
-        full_telemetry_probe(cfg),
-        tokio::task::spawn_blocking({
-            let c = cfg.clone();
-            move || audit_local_defenses(&c)
-        })
-    );
-    let defenses = defenses.unwrap_or_else(|_| audit_local_defenses(cfg));
+pub(crate) fn build_telemetry_payload(
+    cfg: &ShieldConfig,
+    net: NetworkProbeResult,
+    defenses: LocalDefenseAudit,
+) -> TelemetryJson {
     let (region_short, region_full) = tz_short_and_full(&cfg.target_tz);
     let checked_at = Local::now().format("%H:%M:%S").to_string();
 
-    let payload = TelemetryJson {
+    TelemetryJson {
         expected_ip: cfg.expected_ip.clone(),
         proxy_port: cfg.proxy_port,
         target_tz: cfg.target_tz.clone(),
@@ -202,17 +211,29 @@ async fn cmd_telemetry(cfg: &ShieldConfig) {
         api_latency: net.api_latency,
         defenses,
         checked_at,
+    }
+}
+
+async fn cmd_telemetry(cfg: &ShieldConfig, light: bool) {
+    let net = if light {
+        light_telemetry_probe(cfg).await
+    } else {
+        full_telemetry_probe(cfg).await
     };
+    let defenses = audit_local_defenses(cfg);
+    let payload = build_telemetry_payload(cfg, net, defenses);
 
     cfg.write_cache_json("last_telemetry.json", &payload);
     println!("{}", serde_json::to_string(&payload).unwrap_or_default());
 }
 
-async fn evaluate_gate(cfg: &ShieldConfig) -> GateJson {
-    let t0 = std::time::Instant::now();
-    let (proxy, tun, edge) = quick_gate_probe(cfg).await;
-    let elapsed_ms = t0.elapsed().as_millis() as u64;
-
+pub(crate) fn evaluate_gate_with_probes(
+    cfg: &ShieldConfig,
+    proxy: ChannelProbe,
+    tun: ChannelProbe,
+    edge: ChannelProbe,
+    elapsed_ms: u64,
+) -> GateJson {
     let mut error = None;
     if !cfg.is_ip_configured() {
         error = Some("未配置白名单出口 IP (~/.config/claude-guard/expected_ip)。".to_string());
@@ -247,6 +268,13 @@ async fn evaluate_gate(cfg: &ShieldConfig) -> GateJson {
         claude_colo: edge.colo,
         elapsed_ms,
     }
+}
+
+async fn evaluate_gate(cfg: &ShieldConfig) -> GateJson {
+    let t0 = std::time::Instant::now();
+    let (proxy, tun, edge) = quick_gate_probe(cfg).await;
+    let elapsed_ms = t0.elapsed().as_millis() as u64;
+    evaluate_gate_with_probes(cfg, proxy, tun, edge, elapsed_ms)
 }
 
 async fn cmd_gate(cfg: &ShieldConfig, json_mode: bool) {

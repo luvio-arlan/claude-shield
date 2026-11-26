@@ -88,6 +88,20 @@ struct ShieldDashboardView: View {
         ShieldMetricsStyle.apiLatencyColor(ms, jitter: jitter, safe: safeGreen, warn: warnAmber, danger: dangerRed)
     }
 
+    private func syncPulseDot(active: Bool) {
+        if active {
+            withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
+                pulseDot.value = true
+            }
+        } else {
+            var tx = Transaction()
+            tx.disablesAnimations = true
+            withTransaction(tx) {
+                pulseDot.value = false
+            }
+        }
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             sidebarColumn
@@ -109,9 +123,13 @@ struct ShieldDashboardView: View {
             if nav.selectedSection == .purity && vm.purity == nil {
                 vm.refreshPurity(silent: true)
             }
-            withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
-                pulseDot.value = true
-            }
+            syncPulseDot(active: vm.isDashboardVisible)
+        }
+        .onChange(of: vm.isDashboardVisible) { visible in
+            syncPulseDot(active: visible)
+        }
+        .onDisappear {
+            syncPulseDot(active: false)
         }
         .onChange(of: nav.selectedSection) { newSection in
             if newSection == .purity && vm.purity == nil {
@@ -135,7 +153,8 @@ struct ShieldDashboardView: View {
                     ShieldStatusBadge(
                         isSafe: vm.snapshot.isSafe || state.setupReport != nil,
                         accentColor: vm.snapshot.isSafe ? safeGreen : (state.isFirstRun ? brandTerracotta : dangerRed),
-                        isDark: isDark
+                        isDark: isDark,
+                        isActive: vm.isDashboardVisible
                     )
                     .scaleEffect(0.92)
                     .frame(width: 42, height: 42)

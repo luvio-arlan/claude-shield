@@ -60,8 +60,9 @@ pub fn build_proxy_client(cfg: &ShieldConfig, timeout_secs: u64) -> Result<Clien
         .user_agent(UA)
         .timeout(Duration::from_secs(timeout_secs))
         .connect_timeout(Duration::from_secs(timeout_secs.min(4)))
-        .pool_max_idle_per_host(6)
-        .pool_idle_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(4)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Some(Duration::from_secs(30)))
         .tcp_nodelay(true)
         .build()
 }
@@ -73,8 +74,9 @@ pub fn build_direct_v4_client(timeout_secs: u64) -> Result<Client, reqwest::Erro
         .user_agent(UA)
         .timeout(Duration::from_secs(timeout_secs))
         .connect_timeout(Duration::from_secs(timeout_secs.min(4)))
-        .pool_max_idle_per_host(6)
-        .pool_idle_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(4)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Some(Duration::from_secs(30)))
         .tcp_nodelay(true)
         .build()
 }
@@ -326,45 +328,246 @@ pub async fn quick_gate_probe(cfg: &ShieldConfig) -> (ChannelProbe, ChannelProbe
     }
 }
 
-/// Full telemetry network probe for Menu Bar Radar (all channels + calibrated Anthropic API 1-RTT in parallel)
-pub async fn full_telemetry_probe(cfg: &ShieldConfig) -> NetworkProbeResult {
-    let proxy_client_cf = build_proxy_client(cfg, 5);
-    let proxy_client_api = build_proxy_client(cfg, 5);
-    let direct_client = build_direct_v4_client(5);
+/// Single-request trace probe for low-power background keep-alive monitoring.
+/// Reuses existing HTTP/2 keep-alive streams on persistent worker clients so a single
+/// 196-byte trace GET simultaneously verifies exit IP, colo/loc, and wire RTT.
+pub async fn probe_trace_channel_single(client: &Client, primary_url: &str) -> ChannelProbe {
+    let trace_urls: [&str; 2] = if primary_url.contains("1.1.1.1") {
+        [primary_url, "https://www.cloudflare.com/cdn-cgi/trace"]
+    } else {
+        [primary_url, "https://1.1.1.1/cdn-cgi/trace"]
+    };
 
-    let err_probe = ChannelProbe::unreachable();
-
-    let (claude_edge, tun, api_latency) = match (proxy_client_cf, proxy_client_api, direct_client) {
-        (Ok(pc_cf), Ok(pc_api), Ok(dc)) => {
-            // Phase 1: probe CF/TUN channels while concurrently warming the HTTP/2 TLS 1.3 tunnel
-            // to api.anthropic.com so cold handshakes overlap without wasting wall-clock time.
-            let (claude_edge, tun, api_warm) = tokio::join!(
-                probe_trace_channel(&pc_cf, "https://claude.ai/cdn-cgi/trace", true),
-                probe_trace_channel(&dc, "https://1.1.1.1/cdn-cgi/trace", true),
-                warmup_anthropic_api(&pc_api)
-            );
-            // Phase 2: sample warmed HTTP/2 API RTT on a quiet proxy tunnel (zero concurrent burst contention).
-            let api_latency = sample_anthropic_api_warm_rtt(&pc_api, api_warm).await;
-            (claude_edge, tun, api_latency)
+    for trace_url in trace_urls {
+        let t0 = Instant::now();
+        if let Ok(resp) = client.get(trace_url).send().await {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.text().await {
+                    let elapsed = t0.elapsed().as_millis().max(1) as u64;
+                    let trace = parse_cf_trace(&body);
+                    if is_valid_ip_str(&trace.ip) {
+                        return ChannelProbe {
+                            ip: trace.ip,
+                            latency_ms: Some(elapsed),
+                            colo: trace.colo,
+                            loc: trace.loc,
+                            tls: trace.tls,
+                            http: trace.http,
+                            warp: trace.warp,
+                            reachable: true,
+                        };
+                    }
+                }
+            }
         }
-        _ => (
-            err_probe.clone(),
-            err_probe.clone(),
+    }
+
+    for fallback in ["https://api.ipify.org", "https://ifconfig.me/ip"] {
+        let t0 = Instant::now();
+        if let Ok(resp) = client.get(fallback).send().await {
+            if resp.status().is_success() {
+                if let Ok(text) = resp.text().await {
+                    let ip = text.trim().to_string();
+                    if is_valid_ip_str(&ip) {
+                        return ChannelProbe {
+                            ip,
+                            latency_ms: Some(t0.elapsed().as_millis().max(1) as u64),
+                            colo: None,
+                            loc: None,
+                            tls: None,
+                            http: None,
+                            warp: None,
+                            reachable: true,
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    ChannelProbe::unreachable()
+}
+
+/// Persistent HTTP/2 + TLS 1.3 connection pool shared across probes in worker mode.
+/// Automatically rebuilds proxy clients when `proxy_port` changes and supports explicit
+/// resets on macOS wake / network path changes to drop stale half-open sockets.
+pub struct ProbePool {
+    proxy_port: u16,
+    proxy_cf: Option<Client>,
+    proxy_api: Option<Client>,
+    direct_v4: Option<Client>,
+    last_api_warm: Option<ApiWarmupState>,
+    last_api_latency: Option<ApiLatencyMetrics>,
+}
+
+impl ProbePool {
+    pub fn new(cfg: &ShieldConfig) -> Self {
+        let mut pool = Self {
+            proxy_port: cfg.proxy_port,
+            proxy_cf: None,
+            proxy_api: None,
+            direct_v4: None,
+            last_api_warm: None,
+            last_api_latency: None,
+        };
+        pool.ensure_clients(cfg, true);
+        pool
+    }
+
+    pub fn reset(&mut self, cfg: &ShieldConfig) {
+        self.ensure_clients(cfg, true);
+    }
+
+    fn ensure_clients(&mut self, cfg: &ShieldConfig, force_reset: bool) {
+        let port_changed = self.proxy_port != cfg.proxy_port;
+        if force_reset || port_changed || self.proxy_cf.is_none() || self.proxy_api.is_none() {
+            self.proxy_port = cfg.proxy_port;
+            self.proxy_cf = build_proxy_client(cfg, 5).ok();
+            self.proxy_api = build_proxy_client(cfg, 5).ok();
+            self.last_api_warm = None;
+            if port_changed {
+                self.last_api_latency = None;
+            }
+        }
+        if force_reset || self.direct_v4.is_none() {
+            self.direct_v4 = build_direct_v4_client(5).ok();
+        }
+    }
+
+    /// Background light telemetry: 2 warm HTTP/2 trace GETs in parallel (zero API RTT burst).
+    pub async fn probe_light(&mut self, cfg: &ShieldConfig, reset_pool: bool) -> NetworkProbeResult {
+        self.ensure_clients(cfg, reset_pool);
+        let (claude_edge, tun) = match (self.proxy_cf.as_ref(), self.direct_v4.as_ref()) {
+            (Some(pc), Some(dc)) => tokio::join!(
+                probe_trace_channel_single(pc, "https://claude.ai/cdn-cgi/trace"),
+                probe_trace_channel_single(dc, "https://1.1.1.1/cdn-cgi/trace")
+            ),
+            _ => (ChannelProbe::unreachable(), ChannelProbe::unreachable()),
+        };
+
+        let api_latency = if claude_edge.reachable && claude_edge.ip == cfg.expected_ip {
+            self.last_api_latency.clone().unwrap_or(ApiLatencyMetrics {
+                warm_rtt_ms: None,
+                cold_connect_ms: None,
+                jitter_ms: None,
+                status_code: None,
+            })
+        } else {
+            self.last_api_latency = None;
+            self.last_api_warm = None;
             ApiLatencyMetrics {
                 warm_rtt_ms: None,
                 cold_connect_ms: None,
                 jitter_ms: None,
                 status_code: None,
-            },
-        ),
-    };
+            }
+        };
 
-    NetworkProbeResult {
-        proxy: claude_edge.clone(),
-        tun,
-        claude_edge,
-        api_latency,
+        NetworkProbeResult {
+            proxy: claude_edge.clone(),
+            tun,
+            claude_edge,
+            api_latency,
+        }
     }
+
+    /// Foreground full telemetry: warm CF/TUN probes + calibrated Anthropic API 1-RTT & jitter.
+    pub async fn probe_full(&mut self, cfg: &ShieldConfig, reset_pool: bool) -> NetworkProbeResult {
+        self.ensure_clients(cfg, reset_pool);
+        let err_probe = ChannelProbe::unreachable();
+
+        let (claude_edge, tun, api_latency) = match (
+            self.proxy_cf.as_ref(),
+            self.proxy_api.as_ref(),
+            self.direct_v4.as_ref(),
+        ) {
+            (Some(pc_cf), Some(pc_api), Some(dc)) => {
+                let need_api_warm = self.last_api_warm.is_none();
+                let (claude_edge, tun, api_warm) = if need_api_warm {
+                    let (ce, t, w) = tokio::join!(
+                        probe_trace_channel(pc_cf, "https://claude.ai/cdn-cgi/trace", true),
+                        probe_trace_channel(dc, "https://1.1.1.1/cdn-cgi/trace", true),
+                        warmup_anthropic_api(pc_api)
+                    );
+                    (ce, t, w)
+                } else {
+                    let (ce, t) = tokio::join!(
+                        probe_trace_channel_single(pc_cf, "https://claude.ai/cdn-cgi/trace"),
+                        probe_trace_channel_single(dc, "https://1.1.1.1/cdn-cgi/trace")
+                    );
+                    let warm_cached = self.last_api_warm.as_ref().map(|w| ApiWarmupState {
+                        cold_connect_ms: w.cold_connect_ms,
+                        status_code: w.status_code,
+                    });
+                    (ce, t, warm_cached)
+                };
+
+                let api_latency = sample_anthropic_api_warm_rtt(pc_api, api_warm).await;
+                if api_latency.warm_rtt_ms.is_some() {
+                    self.last_api_warm = Some(ApiWarmupState {
+                        cold_connect_ms: api_latency.cold_connect_ms.unwrap_or(0),
+                        status_code: api_latency.status_code,
+                    });
+                    self.last_api_latency = Some(api_latency.clone());
+                } else {
+                    self.last_api_warm = None;
+                    self.last_api_latency = None;
+                }
+                (claude_edge, tun, api_latency)
+            }
+            _ => (
+                err_probe.clone(),
+                err_probe.clone(),
+                ApiLatencyMetrics {
+                    warm_rtt_ms: None,
+                    cold_connect_ms: None,
+                    jitter_ms: None,
+                    status_code: None,
+                },
+            ),
+        };
+
+        NetworkProbeResult {
+            proxy: claude_edge.clone(),
+            tun,
+            claude_edge,
+            api_latency,
+        }
+    }
+
+    pub async fn probe_gate(
+        &mut self,
+        cfg: &ShieldConfig,
+        reset_pool: bool,
+    ) -> (ChannelProbe, ChannelProbe, ChannelProbe) {
+        self.ensure_clients(cfg, reset_pool);
+        match (self.proxy_cf.as_ref(), self.direct_v4.as_ref()) {
+            (Some(pc), Some(dc)) => {
+                let (claude_edge, tun) = tokio::join!(
+                    probe_trace_channel(pc, "https://claude.ai/cdn-cgi/trace", false),
+                    probe_trace_channel(dc, "https://1.1.1.1/cdn-cgi/trace", false)
+                );
+                let proxy = claude_edge.clone();
+                (proxy, tun, claude_edge)
+            }
+            _ => {
+                let err = ChannelProbe::unreachable();
+                (err.clone(), err.clone(), err)
+            }
+        }
+    }
+}
+
+/// Full telemetry network probe for Menu Bar Radar (all channels + calibrated Anthropic API 1-RTT in parallel)
+pub async fn full_telemetry_probe(cfg: &ShieldConfig) -> NetworkProbeResult {
+    let mut pool = ProbePool::new(cfg);
+    pool.probe_full(cfg, false).await
+}
+
+/// Light one-shot telemetry probe (2 parallel trace GETs, zero API RTT burst)
+pub async fn light_telemetry_probe(cfg: &ShieldConfig) -> NetworkProbeResult {
+    let mut pool = ProbePool::new(cfg);
+    pool.probe_light(cfg, false).await
 }
 
 #[cfg(test)]

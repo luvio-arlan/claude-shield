@@ -82,6 +82,22 @@ struct TelemetrySnapshot: Codable, Sendable {
         return s
     }
 
+    func replacingDefenses(_ newDefenses: LocalDefenseModel) -> TelemetrySnapshot {
+        TelemetrySnapshot(
+            expected_ip: expected_ip,
+            proxy_port: proxy_port,
+            target_tz: target_tz,
+            region_short: region_short,
+            region_full: region_full,
+            proxy: proxy,
+            tun: tun,
+            claude_edge: claude_edge,
+            api_latency: api_latency,
+            defenses: newDefenses,
+            checked_at: checked_at
+        )
+    }
+
     static let initial = TelemetrySnapshot(
         expected_ip: "检测中...",
         proxy_port: 7897,
