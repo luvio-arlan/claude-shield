@@ -1,19 +1,21 @@
 # Claude Safe Cage Skill
 
-> macOS 原生轻量级 Claude 防封铁笼（0 虚拟机内存损耗）—— 一键守护 **AdsPower + Claude Code CLI + Claude Desktop** 三端 IP/时区/指纹闭环。
+> **0 虚拟机内存损耗**的 macOS 原生 Claude 防封铁笼：集 **双通道 IP 门禁锁 + 桌面版防误触隐藏 + OAuth 强制拦截 + 原生 Swift 状态栏实时雷达** 于一体。
 
-## 为什么不用虚拟机套娃？
+## 为什么做这个项目？
 
-如果你在 Mac 上只维护 1–2 个主力 Claude 账号，跑 Lima/Docker 虚拟机不仅常驻吃掉 2–4GB 内存、拖慢大型项目读写，还无法调用 Xcode 等原生环境。
+用虚拟机套娃（Lima/Docker）跑 Claude Code 常驻吃掉 2–4GB 内存、拖慢大型前端项目读写，还调不动 macOS 原生工具链；而直接裸跑又怕哪天忘开代理、切错节点、或者手滑点开桌面版瞬间裸连封号。
 
-本 Skill 提供一套 **5 道原生硬件级防线**：
-1. **双通道 IP 门禁锁（Kill-Switch）**：启动前同时校验本地代理端口和默认路由（TUN）出口 IP，必须严格匹配你的独享 IP，否则红字/弹窗熔断拒绝启动。
-2. **运行中硬代理绑定（Fail-Closed）**：CLI 与桌面版（Electron `--proxy-server`）均锁死本地代理端口，代理意外退出时直接断网，绝不回退直连物理网卡。
-3. **OAuth 强制拦截（仅限指纹浏览器）**：自动拦截 `claude.ai` / `anthropic.com` 的系统浏览器弹窗，将授权链接复制到剪贴板，强制走 AdsPower 完成闭环授权。
-4. **进程级时区 & 语言伪装**：自动注入目标时区（如 `America/Los_Angeles`）与 `en_US.UTF-8`，不影响 macOS 系统时钟。
-5. **官方 macOS Seatbelt 沙盒 + 关闭遥测**：写入 `~/.claude/settings.json` 限制越权访问并减少非必要外联。
+**Claude Safe Cage** 用纯 macOS 原生机制实现了 **6 道防线**（全套内存占用 <15MB）：
 
-## 快速安装
+1. **双通道 IP 门禁锁（Kill-Switch）**：启动前 0.5 秒同时校验本地代理端口和默认路由（TUN）出口 IP，不等于白名单独享 IP 直接红字/弹窗熔断。
+2. **运行中硬代理绑定（Fail-Closed）**：CLI 与桌面版（Electron `--proxy-server`）锁死本地代理端口，中途代理崩了立刻断网，绝不回退物理网卡裸连。
+3. **原版防误触隐藏 + 零跳动安全壳**：自动把原版 `Claude.app` 移入隐藏隔离仓（禁止 Spotlight 索引、保留官方签名），`/Applications` 只留 `LSUIElement=true` 零跳动的 `Claude Safe.app`。
+4. **OAuth 强制拦截（AdsPower-Only）**：拦截 `claude.ai` / `anthropic.com` 系统浏览器弹窗，自动复制授权链接到剪贴板，强制走指纹浏览器完成闭环。
+5. **进程级时区 & 语言伪装 + 官方 Seatbelt 沙盒**：强制注入 `TZ=America/Los_Angeles`、`en-US`（不动 Mac 系统时钟），开启 `~/.claude/settings.json` 沙盒与去遥测。
+6. **原生 Swift 状态栏实时雷达（`Claude Guard.app`）**：常驻 macOS 顶部菜单栏，每 15 秒自动巡检双通道 IP、OAuth 锁、原版隐藏与沙盒状态——安全显示 `🟢 LA Safe`，异常秒变 `🔴 IP 异常!`。
+
+## 一键部署
 
 ```bash
 git clone https://github.com/luvio-arlan/claude-safe-cage-skill.git
@@ -25,12 +27,12 @@ bash scripts/install-claude-guard.sh \
   --tz "America/Los_Angeles"
 ```
 
-也可以直接将本仓库作为 Agent Skill 安装到 `~/.gemini/config/skills/claude-safe-cage/` 或 `~/.claude/skills/claude-safe-cage/`。
+也可直接作为 Agent Skill 安装到 `~/.gemini/config/skills/claude-safe-cage/` 或 `~/.claude/skills/claude-safe-cage/`。
 
 ## 完整手册
 
-详细配置规范（含 AdsPower 指纹参数对照表与验真清单）请查看 [SKILL.md](./SKILL.md)。
+详细 AdsPower 指纹配置表、缓存清理与验真命令请查看 [SKILL.md](./SKILL.md)。
 
-## 免责声明
+## License
 
-本工具仅用于网络代理稳定性校验、进程级环境隔离与本地隐私安全防护。请遵守相关服务条款。
+MIT

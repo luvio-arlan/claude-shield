@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Install Claude Safe Cage (macOS Native Kill-Switch for Claude Code & Claude Desktop)
+# Install Claude Safe Cage (CLI + No-Bounce Desktop Launcher + Hidden Vault + Swift Menu Bar Monitor)
 set -euo pipefail
 
 EXPECTED_IP=""
 PROXY_PORT="7897"
 TARGET_TZ="America/Los_Angeles"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,13 +27,17 @@ if [[ -z "${EXPECTED_IP}" ]]; then
 fi
 
 REAL_CLAUDE="$(which -a claude 2>/dev/null | grep -v "$HOME/.local/bin/claude" | head -n 1 || true)"
-if [[ -z "${REAL_CLAUDE}" ]]; then
-  echo "Warning: claude CLI not found in PATH yet; you can edit REAL_CLAUDE in ~/.local/bin/claude later." >&2
-  REAL_CLAUDE="/usr/local/bin/claude"
-fi
+[[ -z "${REAL_CLAUDE}" ]] && REAL_CLAUDE="/usr/local/bin/claude"
 
-mkdir -p "$HOME/.config/claude-guard" "$HOME/.local/bin" "$HOME/.local/lib/claude-guard-bin" "$HOME/.claude"
+mkdir -p "$HOME/.config/claude-guard" "$HOME/.local/bin" "$HOME/.local/lib/claude-guard-bin" "$HOME/.local/apps" "$HOME/.claude"
 printf '%s\n' "${EXPECTED_IP}" > "$HOME/.config/claude-guard/expected_ip"
+printf '%s\n' "${PROXY_PORT}" > "$HOME/.config/claude-guard/proxy_port"
+touch "$HOME/.local/apps/.metadata_never_index"
+
+# Hide original Claude.app into vault to prevent accidental misclick (preserves Apple code signature)
+if [[ -d "/Applications/Claude.app" && ! -d "$HOME/.local/apps/Claude.app" ]]; then
+  mv "/Applications/Claude.app" "$HOME/.local/apps/Claude.app"
+fi
 
 cat > "$HOME/.local/bin/claude-guard.sh" <<EOF
 #!/usr/bin/env bash
@@ -119,8 +125,10 @@ if ! err_msg="\$(check_claude_guard)"; then
   exit 1
 fi
 export_claude_env
-pgrep -x "Claude" >/dev/null 2>&1 && { open -a "/Applications/Claude.app"; exit 0; }
-nohup /Applications/Claude.app/Contents/MacOS/Claude \
+CLAUDE_APP="\${HOME}/.local/apps/Claude.app"
+[[ ! -d "\${CLAUDE_APP}" ]] && CLAUDE_APP="/Applications/Claude.app"
+pgrep -x "Claude" >/dev/null 2>&1 && { open -a "\${CLAUDE_APP}"; exit 0; }
+nohup "\${CLAUDE_APP}/Contents/MacOS/Claude" \
   --proxy-server="http://127.0.0.1:${PROXY_PORT}" \
   --proxy-bypass-list="<-loopback>" \
   --lang="en-US" >/dev/null 2>&1 &
@@ -128,6 +136,60 @@ disown || true
 EOF
 
 chmod +x "$HOME/.local/bin/claude-guard.sh" "$HOME/.local/lib/claude-guard-bin/open" "$HOME/.local/bin/claude" "$HOME/.local/bin/claude-desktop-safe"
+
+# Build no-bounce Claude Safe.app (LSUIElement=true)
+APP="/Applications/Claude Safe.app"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+ICON_SRC="$(ls "$HOME/.local/apps/Claude.app/Contents/Resources/"*.icns /Applications/Claude.app/Contents/Resources/*.icns 2>/dev/null | head -n 1 || true)"
+ICON_NAME=""
+if [[ -n "$ICON_SRC" ]]; then cp "$ICON_SRC" "$APP/Contents/Resources/app.icns"; ICON_NAME="app.icns"; fi
+cat > "$APP/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>ClaudeSafeLauncher</string>
+  <key>CFBundleIdentifier</key><string>com.local.claude.safe</string>
+  <key>CFBundleName</key><string>Claude Safe</string>
+  <key>CFBundleDisplayName</key><string>Claude Safe</string>
+  <key>CFBundleVersion</key><string>1.1</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>${ICON_NAME}</string>
+  <key>LSUIElement</key><true/>
+</dict>
+</plist>
+EOF
+cat > "$APP/Contents/MacOS/ClaudeSafeLauncher" <<'EOF'
+#!/usr/bin/env bash
+export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+exec "$HOME/.local/bin/claude-desktop-safe"
+EOF
+chmod +x "$APP/Contents/MacOS/ClaudeSafeLauncher"
+
+# Build native Swift Menu Bar Monitor App (Claude Guard.app) if swiftc is available
+if command -v swiftc >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/app/ClaudeGuardMenuBar.swift" ]]; then
+  GUARD_APP="/Applications/Claude Guard.app"
+  rm -rf "$GUARD_APP"
+  mkdir -p "$GUARD_APP/Contents/MacOS" "$GUARD_APP/Contents/Resources"
+  swiftc -O -framework Cocoa "${REPO_ROOT}/app/ClaudeGuardMenuBar.swift" -o "$GUARD_APP/Contents/MacOS/ClaudeGuard"
+  cat > "$GUARD_APP/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>ClaudeGuard</string>
+  <key>CFBundleIdentifier</key><string>com.local.claude.guard.menubar</string>
+  <key>CFBundleName</key><string>Claude Guard</string>
+  <key>CFBundleDisplayName</key><string>Claude Guard</string>
+  <key>CFBundleVersion</key><string>1.0</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSUIElement</key><true/>
+</dict>
+</plist>
+EOF
+  echo "✅ Built /Applications/Claude Guard.app (Menu Bar Monitor)"
+fi
 
 if [[ ! -f "$HOME/.claude/settings.json" ]]; then
   cat > "$HOME/.claude/settings.json" <<EOF
