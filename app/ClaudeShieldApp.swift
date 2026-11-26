@@ -376,24 +376,20 @@ final class ShieldViewModel: ObservableObject {
         }
     }
 
-    func copyDiagnostics() {
-        let s = snapshot
-        let report = """
-        [Claude Shield v2.2 Telemetry · \(s.checkedAt)]
-        Status: \(s.isSafe ? "ARMED (SAFE)" : "BREACH WARNING")
-        Whitelist IP: \(s.expectedIP) (\(s.targetTZ)\(s.proxyColo.map { " · \($0)" } ?? ""))
-        Anthropic API 1-RTT: \(s.apiLatencyMs.map { "\($0)ms" } ?? "N/A")
-        Proxy (127.0.0.1:\(s.proxyPort)): \(s.proxyIP) (\(s.proxyLatencyMs.map { "\($0)ms" } ?? "N/A"))
-        TUN Route: \(s.tunIP) (\(s.tunLatencyMs.map { "\($0)ms" } ?? "N/A"))
-        OAuth Lock: \(s.oauthLocked ? "AdsPower-Only" : "Unlocked")
-        Original App Vault: \(s.originalHidden ? "Hidden" : "Exposed")
-        macOS Seatbelt Sandbox: \(s.sandboxEnabled ? "Enabled" : "Disabled")
-        Desktop Process: \(s.desktopPID.map { s.desktopProxyBound ? "Protected (PID \($0))" : "UNPROTECTED (PID \($0))" } ?? "Idle")
-        CLI Guard: \(s.cliReady ? "Armed" : "Not Installed")
-        """
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(report, forType: .string)
-        showToast("诊断快照已复制到剪贴板")
+    func copyDiagnosticScreenshot(_ pngData: Data?) {
+        guard let pngData = pngData, let image = NSImage(data: pngData) else {
+            showToast("截图生成失败，请重试")
+            return
+        }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        let item = NSPasteboardItem()
+        item.setData(pngData, forType: .png)
+        if let tiff = image.tiffRepresentation {
+            item.setData(tiff, forType: .tiff)
+        }
+        pb.writeObjects([item])
+        showToast("诊断截图已复制，可直接 ⌘V 粘贴")
     }
 
     func quitMonitorOnly() {
@@ -824,11 +820,11 @@ struct ShieldPopoverView: View {
                 }
 
                 secondaryActionButton(
-                    icon: "doc.on.doc",
-                    title: "复制诊断",
-                    help: "复制完整环境与网络诊断报告到剪贴板"
+                    icon: "camera.viewfinder",
+                    title: "截图诊断",
+                    help: "生成高清状态诊断截图并复制到剪贴板，可直接 ⌘V 粘贴分享"
                 ) {
-                    vm.copyDiagnostics()
+                    copySnapshotImage()
                 }
 
                 if vm.snapshot.desktopRunning {
@@ -903,6 +899,58 @@ struct ShieldPopoverView: View {
                 .help("仅关闭状态栏雷达，已启动的代理硬绑定、CLI 门禁与沙盒防护持续生效")
         }
         .padding(.top, 1)
+    }
+
+    // Exportable 2x Retina diagnostic card for clipboard screenshot
+    private var diagnosticShareCard: some View {
+        VStack(spacing: 11) {
+            headerCard
+            networkTelemetryRow
+            defenseMatrixGrid
+            HStack {
+                Text("Claude Shield v2.2 · 巡检 \(vm.snapshot.checkedAt)")
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .foregroundColor(labelColor)
+                Spacer()
+                Text(vm.autoKillOnBreach ? "Fail-Closed 已启" : "Fail-Closed 未启")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(vm.autoKillOnBreach ? safeGreen : labelColor)
+            }
+            .padding(.top, 1)
+        }
+        .padding(16)
+        .frame(width: 392)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: isDark
+                            ? [Color(red: 0.13, green: 0.14, blue: 0.16), Color(red: 0.10, green: 0.11, blue: 0.13)]
+                            : [Color(red: 0.96, green: 0.96, blue: 0.95), Color(red: 0.92, green: 0.93, blue: 0.92)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(cardBorder, lineWidth: 1)
+        )
+        .environment(\.colorScheme, colorScheme)
+    }
+
+    private func copySnapshotImage() {
+        if #available(macOS 13.0, *) {
+            let renderer = ImageRenderer(content: diagnosticShareCard)
+            renderer.scale = 2.0
+            if let cgImage = renderer.cgImage {
+                let rep = NSBitmapImageRep(cgImage: cgImage)
+                let png = rep.representation(using: .png, properties: [:])
+                vm.copyDiagnosticScreenshot(png)
+                return
+            }
+        }
+        vm.copyDiagnosticScreenshot(nil)
     }
 }
 
