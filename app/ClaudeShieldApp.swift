@@ -717,35 +717,74 @@ struct ShieldPopoverView: View {
         .shadow(color: cardShadow, radius: 2.5, y: 1)
     }
 
-    // 4. Fail-Closed Auto-Kill Toggle
+    // 4. Fail-Closed Auto-Kill Toggle (custom high-contrast switch immune to macOS inactive-popover graying)
     private var protectionToggleBar: some View {
-        HStack(spacing: 9) {
+        let on = vm.autoKillOnBreach
+        let activeTint = safeGreen
+        return HStack(spacing: 9) {
             ZStack {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill((vm.autoKillOnBreach ? warnAmber : labelColor).opacity(isDark ? 0.18 : 0.12))
+                    .fill((on ? activeTint : labelColor).opacity(isDark ? 0.20 : 0.13))
                     .frame(width: 26, height: 26)
                 Image(systemName: "bolt.shield.fill")
                     .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundColor(vm.autoKillOnBreach ? warnAmber : labelColor)
+                    .foregroundColor(on ? activeTint : labelColor)
             }
-            VStack(alignment: .leading, spacing: 1.5) {
-                Text("IP 漂移自动急停（Fail-Closed）")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundColor(.primary)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text("IP 漂移自动急停")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(.primary)
+                    Text(on ? "已开启" : "已关闭")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundColor(on ? activeTint : labelColor)
+                        .padding(.horizontal, 5.5)
+                        .padding(.vertical, 1.5)
+                        .background(Capsule().fill((on ? activeTint : labelColor).opacity(isDark ? 0.22 : 0.12)))
+                }
                 Text("巡检发现节点异常时自动终止桌面版防裸连")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(labelColor)
             }
-            Spacer()
-            Toggle("", isOn: $vm.autoKillOnBreach)
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .labelsHidden()
+            Spacer(minLength: 6)
+
+            Button(action: {
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.78)) {
+                    vm.autoKillOnBreach.toggle()
+                }
+            }) {
+                ZStack(alignment: on ? .trailing : .leading) {
+                    Capsule()
+                        .fill(on ? activeTint : (isDark ? Color.white.opacity(0.18) : Color.black.opacity(0.16)))
+                        .frame(width: 36, height: 20)
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(on ? activeTint.opacity(0.4) : Color.black.opacity(0.06), lineWidth: 0.6)
+                        )
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 16, height: 16)
+                        .shadow(color: Color.black.opacity(0.22), radius: 2, y: 1)
+                        .padding(2)
+                }
+            }
+            .buttonStyle(.plain)
+            .help(on ? "点击关闭 IP 漂移自动急停" : "点击开启 IP 漂移自动急停")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8.5)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.7))
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(cardSurface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(on ? activeTint.opacity(isDark ? 0.08 : 0.04) : Color.clear)
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(on ? activeTint.opacity(isDark ? 0.36 : 0.28) : cardBorder, lineWidth: on ? 0.9 : 0.7)
+        )
         .shadow(color: cardShadow, radius: 2.5, y: 1)
     }
 
