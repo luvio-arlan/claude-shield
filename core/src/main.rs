@@ -338,7 +338,11 @@ async fn cmd_launch_desktop(cfg: &ShieldConfig) {
     // 2. Fail-Closed dual-channel + claude.ai edge verification
     let gate = evaluate_gate(cfg).await;
     if !gate.ok {
-        let clean = gate.error.unwrap_or_else(|| "出口 IP 校验未通过".into()).replace('"', "'");
+        let clean = gate
+            .error
+            .unwrap_or_else(|| "出口 IP 校验未通过".into())
+            .replace('\\', "\\\\")
+            .replace('"', "'");
         let _ = Command::new("/usr/bin/osascript")
             .args([
                 "-e",
@@ -412,12 +416,13 @@ async fn cmd_launch_desktop(cfg: &ShieldConfig) {
             }
         }
         Err(e) => {
+            let safe_err = e.to_string().replace('\\', "\\\\").replace('"', "'");
             let _ = Command::new("/usr/bin/osascript")
                 .args([
                     "-e",
                     &format!(
                         "display dialog \"⚠️ Claude 桌面版启动失败: {}\" buttons {{\"知道了\"}} default button 1 with icon stop with title \"Claude Shield\"",
-                        e
+                        safe_err
                     ),
                 ])
                 .status();

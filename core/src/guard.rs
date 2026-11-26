@@ -47,9 +47,22 @@ pub fn audit_local_defenses(cfg: &ShieldConfig) -> LocalDefenseAudit {
 
     let settings_path = cfg.home_dir.join(".claude/settings.json");
     let settings_text = fs::read_to_string(&settings_path).unwrap_or_default();
-    let sandbox_enabled = settings_text.contains("\"enabled\": true") || settings_text.contains("\"enabled\":true");
-    let telemetry_disabled = settings_text.contains("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-        && settings_text.contains("DISABLE_TELEMETRY");
+    let settings_json = serde_json::from_str::<serde_json::Value>(&settings_text).ok();
+    let sandbox_enabled = settings_json
+        .as_ref()
+        .and_then(|v| v.pointer("/sandbox/enabled"))
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let telemetry_disabled = settings_json
+        .as_ref()
+        .map(|v| {
+            v.pointer("/env/CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_some()
+                && v.pointer("/env/DISABLE_TELEMETRY").is_some()
+        })
+        .unwrap_or_else(|| {
+            settings_text.contains("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+                && settings_text.contains("DISABLE_TELEMETRY")
+        });
 
     // Process-level audit for Claude Desktop
     let pgrep_out = run_capture("/usr/bin/pgrep", &["-x", "Claude"]);
@@ -115,8 +128,15 @@ fn find_unprotected_claude_cli_pids(cfg: &ShieldConfig) -> Vec<String> {
             _ => continue,
         };
         let rest = trimmed[pid.len()..].trim();
-        // Match real Claude Code CLI process (binary named claude or node running @anthropic-ai/claude-code)
-        let is_claude_cli = (rest.contains("/claude ") || rest.ends_with("/claude") || rest.contains("claude-code"))
+        let mut rest_parts = rest.splitn(2, char::is_whitespace);
+        let comm = rest_parts.next().unwrap_or("");
+        let args_str = rest_parts.next().unwrap_or("").trim();
+        let comm_base = comm.rsplit('/').next().unwrap_or(comm);
+        // Match genuine Claude Code CLI process (binary named `claude` or node running `@anthropic-ai/claude-code`)
+        let is_claude_bin = comm_base == "claude";
+        let is_node_claude = (comm_base == "node" || comm_base == "bun")
+            && (args_str.contains("@anthropic-ai/claude-code") || args_str.contains("/claude-code/"));
+        let is_claude_cli = (is_claude_bin || is_node_claude)
             && !rest.contains("claude-shield")
             && !rest.contains("ClaudeShield")
             && !rest.contains("Claude.app")
@@ -145,7 +165,8 @@ pub fn hide_original_claude_app(cfg: &ShieldConfig) -> Vec<String> {
     let vault_app = vault_dir.join("Claude.app");
     let _ = fs::create_dir_all(&vault_dir);
 
-    if apps_src.exists() {
+    let was_exposed = apps_src.exists();
+    if was_exposed {
         if vault_app.exists() {
             // Claude Desktop auto-updater dropped a newer /Applications/Claude.app -> replace vault copy atomically
             let backup = vault_dir.join("Claude.app.old");
@@ -188,7 +209,7 @@ pub fn hide_original_claude_app(cfg: &ShieldConfig) -> Vec<String> {
     // Unregister original Claude.app from LaunchServices so Spotlight & Launchpad only show Claude Shield.app
     let lsreg = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
     if Path::new(lsreg).exists() {
-        if apps_src.exists() {
+        if was_exposed || apps_src.exists() {
             let _ = Command::new(lsreg)
                 .args(["-u", "/Applications/Claude.app"])
                 .stdout(Stdio::null())
@@ -202,7 +223,9 @@ pub fn hide_original_claude_app(cfg: &ShieldConfig) -> Vec<String> {
                 .stderr(Stdio::null())
                 .status();
         }
-        actions.push("已从 LaunchServices / Spotlight 注销原版 Claude.app 索引".to_string());
+        if was_exposed {
+            actions.push("已从 LaunchServices / Spotlight 注销原版 Claude.app 索引".to_string());
+        }
     }
 
     // Clean stale Claude.app icon from Dock if pinned (surgical Python plist edit)
@@ -246,8 +269,8 @@ pub fn kill_pids(pids: &[String]) {
 }
 
 pub fn send_macos_notification(title: &str, body: &str, sound: Option<&str>) {
-    let safe_title = title.replace('"', "'");
-    let safe_body = body.replace('"', "'").replace('\n', " ");
+    let safe_title = title.replace('\\', "\\\\").replace('"', "'");
+    let safe_body = body.replace('\\', "\\\\").replace('"', "'").replace('\n', " ");
     let script = match sound {
         Some(s) => format!(
             "display notification \"{}\" with title \"{}\" sound name \"{}\"",

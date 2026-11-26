@@ -278,6 +278,11 @@ private enum RustCoreBridge {
             """
             do {
                 try plist.write(to: plistURL, atomically: true, encoding: .utf8)
+                let bootout = Process()
+                bootout.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+                bootout.arguments = ["bootout", "gui/\(uid)", plistURL.path]
+                try? bootout.run()
+                bootout.waitUntilExit()
                 let boot = Process()
                 boot.executableURL = URL(fileURLWithPath: "/bin/launchctl")
                 boot.arguments = ["bootstrap", "gui/\(uid)", plistURL.path]
@@ -312,9 +317,7 @@ final class ShieldViewModel: ObservableObject {
     @Published var purity: PurityReport?
     @Published var selectedTab: ShieldTab = .radar
     @Published var isRefreshing: Bool = false
-    @Published var isCheckingPurity: Bool = false
-    @Published var isPatrolling: Bool = false
-    @Published var pulse: Bool = false
+    @Published var isAuditing: Bool = false
     @Published var autoKillOnBreach: Bool {
         didSet { UserDefaults.standard.set(autoKillOnBreach, forKey: "autoKillOnBreach") }
     }
@@ -352,7 +355,7 @@ final class ShieldViewModel: ObservableObject {
         }
         purityTimer?.invalidate()
         purityTimer = Timer.scheduledTimer(withTimeInterval: 14400.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.runPatrolNow(silent: true) }
+            Task { @MainActor in self?.runFullCheckup(silent: true) }
         }
 
         // Real-time macOS Sleep/Wake instant drift guard
@@ -437,43 +440,50 @@ final class ShieldViewModel: ObservableObject {
     }
 
     func refreshPurity(silent: Bool = false) {
-        guard !isCheckingPurity else { return }
-        isCheckingPurity = true
-        Task.detached(priority: .userInitiated) {
+        guard !isAuditing else { return }
+        isAuditing = true
+        Task.detached(priority: silent ? .utility : .userInitiated) {
             let report = RustCoreBridge.fetchPurity()
             await MainActor.run {
-                self.isCheckingPurity = false
+                self.isAuditing = false
                 if let report = report {
                     self.purity = report
                     self.onStatusChange?(self.snapshot, report)
                     if !silent {
-                        self.showToast("纯净度体检完成：\(report.purity_score) 分（\(report.grade) 级）")
+                        self.showToast("全面体检完成：\(report.purity_score) 分（\(report.grade) 级）")
                     }
                 } else if !silent {
-                    self.showToast("纯净度体检失败，请检查代理连通性")
+                    self.showToast("全面体检失败，请检查代理连通性")
                 }
             }
         }
     }
 
-    func runPatrolNow(silent: Bool = false) {
-        guard !isPatrolling else { return }
-        isPatrolling = true
+    func runFullCheckup(silent: Bool = false) {
+        guard !isAuditing else { return }
+        isAuditing = true
         let autoKill = autoKillOnBreach
-        Task.detached(priority: .utility) {
+        Task.detached(priority: silent ? .utility : .userInitiated) {
             let report = RustCoreBridge.runPatrol(notify: silent, autoKill: autoKill)
             await MainActor.run {
-                self.isPatrolling = false
+                self.isAuditing = false
                 if let report = report {
                     self.purity = report.purity
+                    self.onStatusChange?(self.snapshot, report.purity)
                     self.refresh()
                     if !silent {
                         if report.passed {
-                            self.showToast("全链路巡检通过 · 纯净度 \(report.purity_score)/100 (\(report.grade))")
+                            if !report.auto_healed.isEmpty {
+                                self.showToast("全面体检通过（已自动修复 \(report.auto_healed.count) 项）· \(report.purity_score) 分")
+                            } else {
+                                self.showToast("全面体检通过 · 纯净度 \(report.purity_score) 分（\(report.grade) 级）")
+                            }
                         } else {
-                            self.showToast("巡检发现 \(report.alerts.count) 项异常，请查看纯净度面板")
+                            self.showToast("体检发现 \(report.alerts.count) 项异常，请查看纯净度详情")
                         }
                     }
+                } else if !silent {
+                    self.showToast("全面体检失败，请检查代理连通性")
                 }
             }
         }
@@ -539,7 +549,9 @@ final class ShieldViewModel: ObservableObject {
         task.waitUntilExit()
 
         if let reason = reason {
-            let safe = reason.replacingOccurrences(of: "\"", with: "'")
+            let safe = reason
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "'")
             let alert = Process()
             alert.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
             alert.arguments = ["-e", "display notification \"\(safe)\" with title \"Claude Shield 熔断急停\" sound name \"Sosumi\""]
@@ -585,11 +597,262 @@ final class ShieldViewModel: ObservableObject {
     }
 }
 
+// MARK: - Smooth Interaction Primitives
+
+private final class LocalState<Value>: ObservableObject {
+    @Published var value: Value
+    init(_ initial: Value) { self.value = initial }
+}
+
+private struct SnappyButtonStyle: ButtonStyle {
+    var scale: CGFloat = 0.97
+    var pressedOpacity: Double = 0.88
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? scale : 1.0)
+            .opacity(configuration.isPressed ? pressedOpacity : 1.0)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+}
+
+private struct ShieldStatusBadge: View {
+    let isSafe: Bool
+    let accentColor: Color
+    let isDark: Bool
+    @StateObject private var pulseState = LocalState(false)
+
+    var body: some View {
+        let ringOpacity = pulseState.value ? (isDark ? 0.26 : 0.18) : (isDark ? 0.12 : 0.08)
+        ZStack {
+            Circle()
+                .fill(accentColor.opacity(ringOpacity))
+                .frame(width: 44, height: 44)
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [accentColor.opacity(0.95), accentColor.opacity(0.75)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: 34, height: 34)
+                .shadow(color: accentColor.opacity(0.32), radius: 5, y: 2)
+            Image(systemName: isSafe ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.white)
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
+                pulseState.value = true
+            }
+        }
+    }
+}
+
+private struct HoverableActionButton: View {
+    let icon: String
+    let title: String
+    var tint: Color = .primary
+    var isLoading: Bool = false
+    var isDestructive: Bool = false
+    let isDark: Bool
+    let cardSurface: Color
+    let cardBorder: Color
+    let cardShadow: Color
+    let dangerRed: Color
+    let helpText: String
+    let action: () -> Void
+
+    @StateObject private var hoverState = LocalState(false)
+
+    private var fillColor: Color {
+        let hovered = hoverState.value
+        if isDestructive {
+            return dangerRed.opacity(hovered ? (isDark ? 0.24 : 0.14) : (isDark ? 0.16 : 0.09))
+        }
+        if hovered {
+            return isDark ? Color.white.opacity(0.12) : Color.white.opacity(0.95)
+        }
+        return cardSurface
+    }
+
+    private var borderColor: Color {
+        let hovered = hoverState.value
+        if isDestructive {
+            return dangerRed.opacity(hovered ? 0.45 : (isDark ? 0.35 : 0.25))
+        }
+        if hovered {
+            return isDark ? Color.white.opacity(0.20) : Color.black.opacity(0.14)
+        }
+        return cardBorder
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.82)
+                        .frame(width: 11, height: 11)
+                } else {
+                    Image(systemName: icon)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(tint)
+                }
+                Text(title)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundColor(isDestructive ? dangerRed : .primary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7.5)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(fillColor)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(borderColor, lineWidth: 0.8)
+            )
+            .shadow(color: cardShadow, radius: 2, y: 1)
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(SnappyButtonStyle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                hoverState.value = hovering
+            }
+        }
+        .disabled(isLoading)
+        .help(helpText)
+    }
+}
+
+@available(macOS 13.0, *)
+private struct MatchedHeightTabStack: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? 400
+        let childProposal = ProposedViewSize(width: width, height: nil)
+        let maxHeight = subviews.map { $0.sizeThatFits(childProposal).height }.max() ?? 0
+        return CGSize(width: width, height: maxHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let exactProposal = ProposedViewSize(width: bounds.width, height: bounds.height)
+        for subview in subviews {
+            subview.place(at: bounds.origin, anchor: .topLeading, proposal: exactProposal)
+        }
+    }
+}
+
+private struct SegmentedTabItemButton: View {
+    let tab: ShieldTab
+    let active: Bool
+    let purityScore: Int?
+    let scoreColor: Color
+    let isDark: Bool
+    let brandGradient: LinearGradient
+    let namespace: Namespace.ID
+    let action: () -> Void
+
+    @StateObject private var hoverState = LocalState(false)
+
+    var body: some View {
+        let hovered = hoverState.value && !active
+        let textColor: Color = active ? .white : .primary.opacity(hovered ? 0.92 : 0.72)
+        let hoverFill: Color = isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.045)
+
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: tab == .radar ? "shield.checkered" : "sparkle.magnifyingglass")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(tab.rawValue)
+                    .font(.system(size: 11.5, weight: .semibold))
+                if tab == .purity, let score = purityScore {
+                    Text("\(score)分")
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(active ? .white.opacity(0.95) : scoreColor)
+                        .padding(.horizontal, 4.5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(active ? Color.white.opacity(0.22) : scoreColor.opacity(0.15)))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6.5)
+            .foregroundColor(textColor)
+            .background(
+                ZStack {
+                    if active {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(brandGradient)
+                            .shadow(color: Color(red: 0.75, green: 0.31, blue: 0.18).opacity(0.24), radius: 3, y: 1)
+                            .matchedGeometryEffect(id: "activeTabPill", in: namespace)
+                    } else if hovered {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(hoverFill)
+                    }
+                }
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(SnappyButtonStyle(scale: 0.985, pressedOpacity: 0.92))
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                hoverState.value = hovering
+            }
+        }
+    }
+}
+
+private struct PrimaryLaunchButton: View {
+    let desktopRunning: Bool
+    let isSafe: Bool
+    let brandGradient: LinearGradient
+    let action: () -> Void
+
+    @StateObject private var hoverState = LocalState(false)
+
+    var body: some View {
+        let hovered = hoverState.value
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: desktopRunning ? "macwindow.on.rectangle" : "play.fill")
+                    .font(.system(size: 11.5, weight: .semibold))
+                Text(desktopRunning ? "聚焦 Claude 桌面版" : "安全启动 Claude 桌面版")
+                    .font(.system(size: 12.5, weight: .semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .foregroundColor(.white)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSafe ? AnyShapeStyle(brandGradient) : AnyShapeStyle(Color.gray.opacity(0.65)))
+                    .brightness(hovered ? 0.04 : 0)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.white.opacity(hovered ? 0.28 : 0.18), lineWidth: 0.7)
+            )
+            .shadow(color: isSafe ? Color(red: 0.75, green: 0.31, blue: 0.18).opacity(hovered ? 0.36 : 0.28) : .clear, radius: hovered ? 6 : 4, y: 2)
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(SnappyButtonStyle(scale: 0.98, pressedOpacity: 0.92))
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                hoverState.value = hovering
+            }
+        }
+    }
+}
+
 // MARK: - SwiftUI Commercial UI v3.0
 
 struct ShieldPopoverView: View {
     @ObservedObject var vm: ShieldViewModel
     @Environment(\.colorScheme) private var colorScheme
+    @Namespace private var tabNamespace
 
     private var isDark: Bool { colorScheme == .dark }
 
@@ -648,24 +911,30 @@ struct ShieldPopoverView: View {
         return dangerRed
     }
 
+    private func selectTab(_ tab: ShieldTab) {
+        guard vm.selectedTab != tab else { return }
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+            vm.selectedTab = tab
+        }
+        if tab == .purity && vm.purity == nil {
+            vm.refreshPurity(silent: true)
+        }
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 10) {
                 headerCard
+                    .padding(.horizontal, 14)
                 segmentedTabBar
+                    .padding(.horizontal, 14)
 
-                if vm.selectedTab == .radar {
-                    networkTelemetryRow
-                    defenseMatrixGrid
-                    togglesPanel
-                    actionButtonsBar
-                } else {
-                    purityPanel
-                }
+                tabContentDeck
 
                 footerBar
+                    .padding(.horizontal, 14)
             }
-            .padding(14)
+            .padding(.vertical, 14)
 
             if let toast = vm.toastMessage {
                 Text(toast)
@@ -682,34 +951,58 @@ struct ShieldPopoverView: View {
         .frame(width: 400)
         .fixedSize(horizontal: false, vertical: true)
         .background(VisualEffectView(material: .popover, blendingMode: .behindWindow))
-        .onAppear {
-            withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
-                vm.pulse = true
+    }
+
+    @ViewBuilder
+    private var tabContentDeck: some View {
+        let isRadar = vm.selectedTab == .radar
+        let content = Group {
+            radarTabContent
+                .padding(.horizontal, 14)
+                .padding(.vertical, 2)
+                .opacity(isRadar ? 1 : 0)
+                .offset(x: isRadar ? 0 : -16)
+                .allowsHitTesting(isRadar)
+                .accessibilityHidden(!isRadar)
+
+            purityPanel
+                .padding(.horizontal, 14)
+                .padding(.vertical, 2)
+                .opacity(isRadar ? 0 : 1)
+                .offset(x: isRadar ? 16 : 0)
+                .allowsHitTesting(!isRadar)
+                .accessibilityHidden(isRadar)
+        }
+
+        if #available(macOS 13.0, *) {
+            MatchedHeightTabStack {
+                content
             }
+            .clipped()
+            .padding(.vertical, -2)
+        } else {
+            ZStack(alignment: .top) {
+                content
+            }
+            .clipped()
+            .padding(.vertical, -2)
+        }
+    }
+
+    private var radarTabContent: some View {
+        VStack(spacing: 10) {
+            networkTelemetryRow
+            defenseMatrixGrid
+            togglesPanel
+            Spacer(minLength: 0)
+            actionButtonsBar
         }
     }
 
     // 1. Hero Status Card
     private var headerCard: some View {
         HStack(spacing: 11) {
-            ZStack {
-                Circle()
-                    .fill(accentColor.opacity(vm.pulse ? (isDark ? 0.26 : 0.18) : (isDark ? 0.12 : 0.08)))
-                    .frame(width: 44, height: 44)
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [accentColor.opacity(0.95), accentColor.opacity(0.75)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 34, height: 34)
-                    .shadow(color: accentColor.opacity(0.32), radius: 5, y: 2)
-                Image(systemName: vm.snapshot.isSafe ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.white)
-            }
+            ShieldStatusBadge(isSafe: vm.snapshot.isSafe, accentColor: accentColor, isDark: isDark)
 
             VStack(alignment: .leading, spacing: 3.5) {
                 HStack(spacing: 6) {
@@ -749,9 +1042,7 @@ struct ShieldPopoverView: View {
             if let p = vm.purity {
                 let pc = purityColor(p.purity_score)
                 Button(action: {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        vm.selectedTab = vm.selectedTab == .radar ? .purity : .radar
-                    }
+                    selectTab(vm.selectedTab == .radar ? .purity : .radar)
                 }) {
                     VStack(alignment: .trailing, spacing: 1) {
                         HStack(spacing: 3) {
@@ -769,8 +1060,9 @@ struct ShieldPopoverView: View {
                             .font(.system(size: 9.5, weight: .medium))
                             .foregroundColor(labelColor)
                     }
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SnappyButtonStyle(scale: 0.95))
                 .help("点击切换 IP 纯净度深度体检面板")
             } else {
                 VStack(alignment: .trailing, spacing: 1) {
@@ -805,42 +1097,21 @@ struct ShieldPopoverView: View {
         .shadow(color: cardShadow, radius: 4, y: 1.5)
     }
 
-    // 2. Segmented Tab Bar
+    // 2. Segmented Tab Bar (Spring Sliding Pill)
     private var segmentedTabBar: some View {
         HStack(spacing: 4) {
             ForEach(ShieldTab.allCases, id: \.self) { tab in
-                let active = vm.selectedTab == tab
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        vm.selectedTab = tab
-                    }
-                    if tab == .purity && vm.purity == nil {
-                        vm.refreshPurity()
-                    }
-                }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: tab == .radar ? "shield.checkered" : "sparkle.magnifyingglass")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text(tab.rawValue)
-                            .font(.system(size: 11.5, weight: .semibold))
-                        if tab == .purity, let p = vm.purity {
-                            Text("\(p.purity_score)分")
-                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                                .foregroundColor(active ? .white.opacity(0.95) : purityColor(p.purity_score))
-                                .padding(.horizontal, 4.5)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(active ? Color.white.opacity(0.22) : purityColor(p.purity_score).opacity(0.15)))
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .foregroundColor(active ? .white : .primary.opacity(0.75))
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(active ? AnyShapeStyle(brandGradient) : AnyShapeStyle(Color.clear))
-                    )
+                SegmentedTabItemButton(
+                    tab: tab,
+                    active: vm.selectedTab == tab,
+                    purityScore: vm.purity?.purity_score,
+                    scoreColor: purityColor(vm.purity?.purity_score ?? 100),
+                    isDark: isDark,
+                    brandGradient: brandGradient,
+                    namespace: tabNamespace
+                ) {
+                    selectTab(tab)
                 }
-                .buttonStyle(.plain)
             }
         }
         .padding(3)
@@ -1015,8 +1286,8 @@ struct ShieldPopoverView: View {
 
             compactToggleRow(
                 icon: "sunrise.fill",
-                title: "开机自启 & 每日巡检守护",
-                subtitle: vm.snapshot.defenses.daily_patrol_enabled ? "登录静默启动雷达 · 每日自动纯净度体检" : "登录静默启动状态栏保护雷达",
+                title: "开机自启 & 每日自动体检",
+                subtitle: vm.snapshot.defenses.daily_patrol_enabled ? "登录静默启动雷达 · 每日后台自动复检防线" : "登录静默启动状态栏保护雷达",
                 isOn: vm.loginAutoStart
             ) {
                 withAnimation(.spring(response: 0.24, dampingFraction: 0.78)) {
@@ -1065,8 +1336,9 @@ struct ShieldPopoverView: View {
                         .shadow(color: Color.black.opacity(0.22), radius: 2, y: 1)
                         .padding(2)
                 }
+                .contentShape(Capsule())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(SnappyButtonStyle(scale: 0.94, pressedOpacity: 0.95))
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -1079,7 +1351,7 @@ struct ShieldPopoverView: View {
 
     // 6. Purity Tab (ip.net.coffee/claude Grade Multi-Source Audit)
     private var purityPanel: some View {
-        VStack(spacing: 9) {
+        VStack(spacing: 8.5) {
             if let p = vm.purity {
                 let pc = purityColor(p.purity_score)
                 // Score Gauge & IP Meta
@@ -1093,6 +1365,7 @@ struct ShieldPopoverView: View {
                             .stroke(pc, style: StrokeStyle(lineWidth: 5.5, lineCap: .round))
                             .rotationEffect(.degrees(-90))
                             .frame(width: 56, height: 56)
+                            .animation(.spring(response: 0.45, dampingFraction: 0.82), value: p.purity_score)
                         VStack(spacing: 0) {
                             Text("\(p.purity_score)")
                                 .font(.system(size: 16, weight: .bold, design: .rounded))
@@ -1142,7 +1415,7 @@ struct ShieldPopoverView: View {
                 }
 
                 // Itemized Risk Factors
-                VStack(spacing: 5) {
+                VStack(spacing: 4.5) {
                     ForEach(p.factors.prefix(6)) { f in
                         HStack(alignment: .top, spacing: 7) {
                             Image(systemName: f.severity == "good" ? "checkmark.circle.fill" : (f.severity == "warn" ? "exclamationmark.triangle.fill" : "xmark.octagon.fill"))
@@ -1168,7 +1441,7 @@ struct ShieldPopoverView: View {
                             }
                         }
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 5.5)
+                        .padding(.vertical, 5)
                         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(cardSurface))
                         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.6))
                     }
@@ -1185,22 +1458,16 @@ struct ShieldPopoverView: View {
                 .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(cardSurface))
             }
 
+            Spacer(minLength: 0)
+
             HStack(spacing: 8) {
                 secondaryActionButton(
                     icon: "sparkle.magnifyingglass",
-                    title: vm.isCheckingPurity ? "体检中..." : "深度复测纯净度",
-                    isLoading: vm.isCheckingPurity,
-                    help: "调用多源 IP 情报库 + claude.ai 边缘 + DNS/IPv6 泄露全量复测"
+                    title: vm.isAuditing ? "全面体检中..." : "重新全面体检",
+                    isLoading: vm.isAuditing,
+                    help: "复测多源 IP 纯净度、DNS/IPv6 泄露，并自动巡检修复本地防线"
                 ) {
-                    vm.refreshPurity()
-                }
-                secondaryActionButton(
-                    icon: "checkmark.shield",
-                    title: vm.isPatrolling ? "巡检中..." : "立即执行巡检",
-                    isLoading: vm.isPatrolling,
-                    help: "执行每日级全链路巡检并自动修复暴露的原版 App"
-                ) {
-                    vm.runPatrolNow()
+                    vm.runFullCheckup()
                 }
                 if vm.snapshot.defenses.original_app_exposed {
                     secondaryActionButton(
@@ -1236,27 +1503,13 @@ struct ShieldPopoverView: View {
     // 7. Primary & Secondary Actions
     private var actionButtonsBar: some View {
         VStack(spacing: 7) {
-            Button(action: { vm.launchClaudeSafe() }) {
-                HStack(spacing: 6) {
-                    Image(systemName: vm.snapshot.desktopRunning ? "macwindow.on.rectangle" : "play.fill")
-                        .font(.system(size: 11.5, weight: .semibold))
-                    Text(vm.snapshot.desktopRunning ? "聚焦 Claude 桌面版" : "安全启动 Claude 桌面版")
-                        .font(.system(size: 12.5, weight: .semibold))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
-                .foregroundColor(.white)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(vm.snapshot.isSafe ? AnyShapeStyle(brandGradient) : AnyShapeStyle(Color.gray.opacity(0.65)))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.7)
-                )
-                .shadow(color: vm.snapshot.isSafe ? Color(red: 0.75, green: 0.31, blue: 0.18).opacity(0.28) : .clear, radius: 4, y: 2)
+            PrimaryLaunchButton(
+                desktopRunning: vm.snapshot.desktopRunning,
+                isSafe: vm.snapshot.isSafe,
+                brandGradient: brandGradient
+            ) {
+                vm.launchClaudeSafe()
             }
-            .buttonStyle(.plain)
 
             HStack(spacing: 7) {
                 secondaryActionButton(
@@ -1269,12 +1522,12 @@ struct ShieldPopoverView: View {
                 }
 
                 secondaryActionButton(
-                    icon: "checkmark.shield",
-                    title: vm.isPatrolling ? "巡检中" : "立即巡检",
-                    isLoading: vm.isPatrolling,
-                    help: "执行全链路安全与纯净度巡检"
+                    icon: "sparkle.magnifyingglass",
+                    title: vm.isAuditing ? "体检中" : "全面体检",
+                    isLoading: vm.isAuditing,
+                    help: "执行 IP 纯净度、DNS/IPv6 泄露与本地防线全量体检（含自动修复）"
                 ) {
-                    vm.runPatrolNow()
+                    vm.runFullCheckup()
                 }
 
                 secondaryActionButton(
@@ -1309,52 +1562,34 @@ struct ShieldPopoverView: View {
         help: String,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                if isLoading {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .scaleEffect(0.82)
-                        .frame(width: 11, height: 11)
-                } else {
-                    Image(systemName: icon)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(tint)
-                }
-                Text(title)
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundColor(isDestructive ? dangerRed : .primary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(isDestructive ? dangerRed.opacity(isDark ? 0.16 : 0.09) : cardSurface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(isDestructive ? dangerRed.opacity(isDark ? 0.35 : 0.25) : cardBorder, lineWidth: 0.8)
-            )
-            .shadow(color: cardShadow, radius: 2, y: 1)
-        }
-        .buttonStyle(.plain)
-        .disabled(isLoading)
-        .help(help)
+        HoverableActionButton(
+            icon: icon,
+            title: title,
+            tint: tint,
+            isLoading: isLoading,
+            isDestructive: isDestructive,
+            isDark: isDark,
+            cardSurface: cardSurface,
+            cardBorder: cardBorder,
+            cardShadow: cardShadow,
+            dangerRed: dangerRed,
+            helpText: help,
+            action: action
+        )
     }
 
     // 8. Footer
     private var footerBar: some View {
         HStack {
-            Text("Claude Shield v3.0 Rust · 巡检 \(vm.snapshot.checked_at)")
+            Text("Claude Shield v3.0 Rust · 更新 \(vm.snapshot.checked_at)")
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundColor(labelColor)
             Spacer()
             Button("退出监控") { vm.quitMonitorOnly() }
-                .buttonStyle(.plain)
+                .buttonStyle(SnappyButtonStyle(scale: 0.95))
                 .font(.system(size: 10.5, weight: .semibold))
                 .foregroundColor(labelColor)
-                .help("仅关闭状态栏雷达，Rust CLI 门禁、每日巡检与沙盒防护持续生效")
+                .help("仅关闭状态栏雷达，Rust CLI 门禁、每日自动体检与沙盒防护持续生效")
         }
         .padding(.top, 1)
     }
@@ -1530,8 +1765,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updatePopoverSize() {
         hostingController.view.layoutSubtreeIfNeeded()
         let fitting = hostingController.view.fittingSize
-        if fitting.width > 0 && fitting.height > 0 {
-            popover.contentSize = NSSize(width: 400, height: ceil(fitting.height))
+        let targetHeight = ceil(fitting.height)
+        if fitting.width > 0 && targetHeight > 0 && abs(popover.contentSize.height - targetHeight) > 1 {
+            popover.contentSize = NSSize(width: 400, height: targetHeight)
         }
     }
 

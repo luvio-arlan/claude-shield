@@ -75,7 +75,16 @@ pub fn build_direct_v6_client(timeout_secs: u64) -> Result<Client, reqwest::Erro
         .build()
 }
 
-fn parse_cf_trace(body: &str) -> (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>) {
+struct CfTrace {
+    ip: String,
+    colo: Option<String>,
+    loc: Option<String>,
+    tls: Option<String>,
+    http: Option<String>,
+    warp: Option<String>,
+}
+
+fn parse_cf_trace(body: &str) -> CfTrace {
     let mut ip = String::new();
     let mut colo = None;
     let mut loc = None;
@@ -97,7 +106,7 @@ fn parse_cf_trace(body: &str) -> (String, Option<String>, Option<String>, Option
             warp = Some(v.trim().to_string());
         }
     }
-    (ip, colo, loc, tls, http, warp)
+    CfTrace { ip, colo, loc, tls, http, warp }
 }
 
 fn is_valid_ip_str(s: &str) -> bool {
@@ -106,7 +115,9 @@ fn is_valid_ip_str(s: &str) -> bool {
 
 /// Probe Cloudflare trace URLs in priority order:
 /// req1 fetches IP/metadata & warms HTTP/2 keep-alive;
-/// req2-3 (warmed HEAD on same HTTP/2 stream) measure true calibrated 1-RTT wire latency.
+/// req2-3 (warmed GET on same HTTP/2 stream, ~196B payload, zero redirects) measure true calibrated 1-RTT wire latency.
+/// Note: HEAD on 1.1.1.1/cdn-cgi/trace returns 302 -> one.one.one.one (inflating RTT 2-3x),
+/// and HEAD on claude.ai/cdn-cgi/trace returns 403 challenge; GET returns 200 directly on all endpoints.
 pub async fn probe_trace_channel(client: &Client, primary_url: &str, measure_rtt: bool) -> ChannelProbe {
     let trace_urls: Vec<&str> = if primary_url.contains("1.1.1.1") {
         vec![primary_url, "https://www.cloudflare.com/cdn-cgi/trace"]
@@ -118,14 +129,14 @@ pub async fn probe_trace_channel(client: &Client, primary_url: &str, measure_rtt
         if let Ok(resp) = client.get(trace_url).send().await {
             if resp.status().is_success() {
                 if let Ok(body) = resp.text().await {
-                    let (ip, colo, loc, tls, http, warp) = parse_cf_trace(&body);
-                    if is_valid_ip_str(&ip) {
+                    let trace = parse_cf_trace(&body);
+                    if is_valid_ip_str(&trace.ip) {
                         let mut rtt = None;
                         if measure_rtt {
                             let mut samples = Vec::with_capacity(2);
                             for _ in 0..2 {
                                 let t0 = Instant::now();
-                                if let Ok(r2) = client.head(trace_url).send().await {
+                                if let Ok(r2) = client.get(trace_url).send().await {
                                     let _ = r2.bytes().await;
                                     samples.push(t0.elapsed().as_millis().max(1) as u64);
                                 }
@@ -133,13 +144,13 @@ pub async fn probe_trace_channel(client: &Client, primary_url: &str, measure_rtt
                             rtt = samples.into_iter().min();
                         }
                         return ChannelProbe {
-                            ip,
+                            ip: trace.ip,
                             latency_ms: rtt,
-                            colo,
-                            loc,
-                            tls,
-                            http,
-                            warp,
+                            colo: trace.colo,
+                            loc: trace.loc,
+                            tls: trace.tls,
+                            http: trace.http,
+                            warp: trace.warp,
                             reachable: true,
                         };
                     }
@@ -213,11 +224,13 @@ pub async fn probe_anthropic_api_latency(client: &Client) -> ApiLatencyMetrics {
     };
     let cold_ms = t_cold.elapsed().as_millis().max(1) as u64;
     let status = Some(warm_resp.status().as_u16());
+    let _ = warm_resp.bytes().await;
 
     let mut samples: Vec<u64> = Vec::with_capacity(2);
     for _ in 0..2 {
         let t = Instant::now();
-        if client.head(url).send().await.is_ok() {
+        if let Ok(r) = client.head(url).send().await {
+            let _ = r.bytes().await;
             samples.push(t.elapsed().as_millis().max(1) as u64);
         }
     }
