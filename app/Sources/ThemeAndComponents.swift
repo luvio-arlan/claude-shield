@@ -351,29 +351,56 @@ enum ShieldBrandGraphics {
     }
 }
 
+struct PulsingOpacityView<Content: View>: View {
+    let isActive: Bool
+    let duration: Double
+    let minOpacity: Double
+    let maxOpacity: Double
+    @ViewBuilder let content: () -> Content
+
+    @StateObject private var isPulsing = LocalState(false)
+
+    private func stopPulse() {
+        guard isPulsing.value else { return }
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            isPulsing.value = false
+        }
+    }
+
+    var body: some View {
+        content()
+            .opacity(isPulsing.value ? maxOpacity : minOpacity)
+            .animation(
+                isActive && isPulsing.value
+                    ? .easeInOut(duration: duration).repeatForever(autoreverses: true)
+                    : nil,
+                value: isPulsing.value
+            )
+            .task(id: isActive) {
+                guard isActive else {
+                    stopPulse()
+                    return
+                }
+                // Let initial window/layout commit finish before starting leaf opacity pulse
+                try? await Task.sleep(nanoseconds: 40_000_000)
+                guard !Task.isCancelled, isActive else { return }
+                isPulsing.value = true
+            }
+            .onDisappear {
+                stopPulse()
+            }
+    }
+}
+
 struct ShieldStatusBadge: View {
     let isSafe: Bool
     let accentColor: Color
     let isDark: Bool
     var isActive: Bool = true
-    @StateObject private var pulseState = LocalState(false)
-
-    private func syncPulseAnimation(active: Bool) {
-        if active {
-            withAnimation(.easeInOut(duration: 1.9).repeatForever(autoreverses: true)) {
-                pulseState.value = true
-            }
-        } else {
-            var tx = Transaction()
-            tx.disablesAnimations = true
-            withTransaction(tx) {
-                pulseState.value = false
-            }
-        }
-    }
 
     var body: some View {
-        let ringOpacity = pulseState.value ? (isDark ? 0.24 : 0.16) : (isDark ? 0.09 : 0.06)
         let tileBgTop = isDark
             ? Color(red: 0.17, green: 0.165, blue: 0.16)
             : Color(red: 0.97, green: 0.953, blue: 0.925)
@@ -385,9 +412,16 @@ struct ShieldStatusBadge: View {
             : accentColor.opacity(isDark ? 0.55 : 0.45)
 
         ZStack {
-            RoundedRectangle(cornerRadius: 13.5, style: .continuous)
-                .fill(accentColor.opacity(ringOpacity))
-                .frame(width: 46, height: 46)
+            PulsingOpacityView(
+                isActive: isActive,
+                duration: 1.9,
+                minOpacity: isDark ? 0.09 : 0.06,
+                maxOpacity: isDark ? 0.24 : 0.16
+            ) {
+                RoundedRectangle(cornerRadius: 13.5, style: .continuous)
+                    .fill(accentColor)
+            }
+            .frame(width: 46, height: 46)
 
             RoundedRectangle(cornerRadius: 10.5, style: .continuous)
                 .fill(
@@ -418,15 +452,6 @@ struct ShieldStatusBadge: View {
                 )
                 .shadow(color: accentColor.opacity(0.45), radius: 2.5, y: 0.5)
                 .offset(x: 15.5, y: 15.5)
-        }
-        .onAppear {
-            syncPulseAnimation(active: isActive)
-        }
-        .onChange(of: isActive) { active in
-            syncPulseAnimation(active: active)
-        }
-        .onDisappear {
-            syncPulseAnimation(active: false)
         }
     }
 }

@@ -90,6 +90,14 @@ def check_swift_guardrails(errors: list[str]) -> None:
                     "Gate repeating SwiftUI animations on view visibility and cancel via `disablesAnimations = true` in `.onDisappear` so hidden windows consume 0% CPU.",
                 )
             )
+        if re.search(r"withAnimation\s*\([^)]*\.repeatForever\(", text):
+            errors.append(
+                fail(
+                    "NO_EXPLICIT_WITH_ANIMATION_REPEAT_FOREVER",
+                    f"Found `withAnimation(...repeatForever(` in app/Sources/{p.name}.",
+                    "Never pass `.repeatForever` to explicit `withAnimation` (it leaks infinite repeating transactions into sibling layout/position updates); use `PulsingOpacityView` or value-scoped `.animation(..., value:)` on an isolated leaf view.",
+                )
+            )
         for pat in ("fatalError(", "try!", " as! "):
             if pat in text:
                 errors.append(

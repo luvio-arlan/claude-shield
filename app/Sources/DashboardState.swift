@@ -243,8 +243,27 @@ final class ShieldDashboardWindowController: NSObject, NSWindowDelegate {
         )
 
         let hc = NSHostingController(rootView: rootView)
+        hc.sizingOptions = []
+
+        let initialFrame: NSRect
+        if let restored = savedWindowFrame {
+            initialFrame = restored
+        } else if let screen = NSScreen.main ?? NSScreen.screens.first {
+            let vf = screen.visibleFrame
+            let w = min(980, vf.width - 64)
+            let h = min(752, vf.height - 48)
+            initialFrame = NSRect(
+                x: vf.midX - w / 2.0,
+                y: vf.midY - h / 2.0 + 12,
+                width: w,
+                height: h
+            )
+        } else {
+            initialFrame = NSRect(x: 0, y: 0, width: 980, height: 752)
+        }
+
         let win = ShieldDashboardWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 980, height: 752),
+            contentRect: initialFrame,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -260,25 +279,11 @@ final class ShieldDashboardWindowController: NSObject, NSWindowDelegate {
         win.contentViewController = hc
         win.delegate = self
         win.suppressAutoFocusUntil = Date().addingTimeInterval(0.24)
-
-        if let restored = savedWindowFrame {
-            win.setFrame(restored, display: true)
-        } else if let screen = NSScreen.main ?? NSScreen.screens.first {
-            let vf = screen.visibleFrame
-            let w = min(980, vf.width - 64)
-            let h = min(752, vf.height - 48)
-            win.setFrame(
-                NSRect(
-                    x: vf.midX - w / 2.0,
-                    y: vf.midY - h / 2.0 + 12,
-                    width: w,
-                    height: h
-                ),
-                display: true
-            )
-        } else {
+        win.setFrame(initialFrame, display: false)
+        if savedWindowFrame == nil && NSScreen.main == nil && NSScreen.screens.isEmpty {
             win.center()
         }
+        win.contentView?.layoutSubtreeIfNeeded()
 
         self.window = win
         presentSmoothly(win)

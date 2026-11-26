@@ -19,7 +19,6 @@ struct ShieldDashboardView: View {
     @StateObject var updateHover = LocalState(false)
     @StateObject private var hideBarHover = LocalState(false)
     @StateObject private var launchHover = LocalState(false)
-    @StateObject private var pulseDot = LocalState(false)
 
     var isDark: Bool { colorScheme == .dark }
 
@@ -88,20 +87,6 @@ struct ShieldDashboardView: View {
         ShieldMetricsStyle.apiLatencyColor(ms, jitter: jitter, safe: safeGreen, warn: warnAmber, danger: dangerRed)
     }
 
-    private func syncPulseDot(active: Bool) {
-        if active {
-            withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
-                pulseDot.value = true
-            }
-        } else {
-            var tx = Transaction()
-            tx.disablesAnimations = true
-            withTransaction(tx) {
-                pulseDot.value = false
-            }
-        }
-    }
-
     var body: some View {
         HStack(spacing: 0) {
             sidebarColumn
@@ -123,13 +108,6 @@ struct ShieldDashboardView: View {
             if nav.selectedSection == .purity && vm.purity == nil {
                 vm.refreshPurity(silent: true)
             }
-            syncPulseDot(active: vm.isDashboardVisible)
-        }
-        .onChange(of: vm.isDashboardVisible) { visible in
-            syncPulseDot(active: visible)
-        }
-        .onDisappear {
-            syncPulseDot(active: false)
         }
         .onChange(of: nav.selectedSection) { newSection in
             if newSection == .purity && vm.purity == nil {
@@ -194,10 +172,16 @@ struct ShieldDashboardView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     VStack(alignment: .leading, spacing: 6.5) {
                         HStack(spacing: 6.5) {
-                            Circle()
-                                .fill(accentColor)
-                                .frame(width: 7.5, height: 7.5)
-                                .opacity(pulseDot.value ? 1.0 : 0.42)
+                            PulsingOpacityView(
+                                isActive: vm.isDashboardVisible,
+                                duration: 2.2,
+                                minOpacity: 0.42,
+                                maxOpacity: 1.0
+                            ) {
+                                Circle()
+                                    .fill(accentColor)
+                            }
+                            .frame(width: 7.5, height: 7.5)
                             Text(vm.snapshot.isSafe ? "静谧守护中" : "防线需关注")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundColor(accentColor)
@@ -254,7 +238,8 @@ struct ShieldDashboardView: View {
                         )
                     }
                     .buttonStyle(SnappyButtonStyle(scale: 0.98))
-                    .onHover { h in withAnimation(.easeOut(duration: 0.12)) { launchHover.value = h } }
+                    .animation(.easeOut(duration: 0.12), value: launchHover.value)
+                    .onHover { launchHover.value = $0 }
                     .disabled(vm.isCheckingLaunch)
                     .padding(9)
                 }
@@ -359,12 +344,12 @@ struct ShieldDashboardView: View {
             .allowsHitTesting(false)
             .ignoresSafeArea()
 
-            GeometryReader { geo in
-                let contentWidth = max(480, geo.size.width - 48)
-                let useThreeMatrixCols = contentWidth >= 560
+            VStack(spacing: 0) {
+                topBarHeader
 
-                VStack(spacing: 0) {
-                    topBarHeader
+                GeometryReader { geo in
+                    let contentWidth = max(480, geo.size.width - 48)
+                    let useThreeMatrixCols = contentWidth >= 560
 
                     ScrollView(.vertical, showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 14) {
@@ -473,7 +458,8 @@ struct ShieldDashboardView: View {
                     )
                 }
                 .buttonStyle(SnappyButtonStyle(scale: 0.96))
-                .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hideBarHover.value = h } }
+                .animation(.easeOut(duration: 0.12), value: hideBarHover.value)
+                .onHover { hideBarHover.value = $0 }
                 .help("隐藏控制台至顶部状态栏继续守护（⌘W）")
             }
         }
@@ -513,7 +499,8 @@ struct ShieldDashboardView: View {
             .background(Capsule().fill(updatePillBackground))
         }
         .buttonStyle(SnappyButtonStyle(scale: 0.96))
-        .onHover { h in withAnimation(.easeOut(duration: 0.12)) { updateHover.value = h } }
+        .animation(.easeOut(duration: 0.12), value: updateHover.value)
+        .onHover { updateHover.value = $0 }
         .disabled(vm.updatePhase.isBusy)
         .help("从 GitHub Releases 检查并安装最新版本")
     }
