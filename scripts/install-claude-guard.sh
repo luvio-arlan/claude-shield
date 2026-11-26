@@ -125,6 +125,9 @@ if ! err_msg="\$(check_claude_guard)"; then
   exit 1
 fi
 export_claude_env
+if [[ -d "/Applications/Claude Guard.app" ]] && ! pgrep -x "ClaudeGuard" >/dev/null 2>&1; then
+  open -g -a "/Applications/Claude Guard.app" >/dev/null 2>&1 || true
+fi
 CLAUDE_APP="\${HOME}/.local/apps/Claude.app"
 [[ ! -d "\${CLAUDE_APP}" ]] && CLAUDE_APP="/Applications/Claude.app"
 pgrep -x "Claude" >/dev/null 2>&1 && { open -a "\${CLAUDE_APP}"; exit 0; }
@@ -172,7 +175,7 @@ if command -v swiftc >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/app/ClaudeGuardMenuB
   GUARD_APP="/Applications/Claude Guard.app"
   rm -rf "$GUARD_APP"
   mkdir -p "$GUARD_APP/Contents/MacOS" "$GUARD_APP/Contents/Resources"
-  swiftc -O -framework Cocoa "${REPO_ROOT}/app/ClaudeGuardMenuBar.swift" -o "$GUARD_APP/Contents/MacOS/ClaudeGuard"
+  swiftc -O -framework Cocoa -framework SwiftUI "${REPO_ROOT}/app/ClaudeGuardMenuBar.swift" -o "$GUARD_APP/Contents/MacOS/ClaudeGuard"
   cat > "$GUARD_APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

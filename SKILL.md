@@ -22,7 +22,7 @@ description: >-
 | **③ 原版防误触隔离 + 无跳动安全壳** | 将原版 `Claude.app` 移入 `~/.local/apps/`（加 `.metadata_never_index` 禁止 Spotlight 索引，保留官方签名），`/Applications/` 仅保留 `LSUIElement=true` 零跳动 `Claude Safe.app` | 手滑点到原版桌面客户端瞬间裸连 |
 | **④ OAuth 强制拦截（仅限指纹浏览器）** | 拦截 `open` / `$BROWSER` 对 `claude.ai` 与 `anthropic.com` 的调用，自动复制链接到剪贴板并拒绝拉起宿主机 Chrome/Safari | 首次登录或续期时误弹宿主机浏览器导致关联风控 |
 | **⑤ 进程级时区/语言对齐 + Seatbelt 沙盒** | 注入 `TZ=America/Los_Angeles`、`LANG=en_US.UTF-8`、`--lang=en-US`（不动系统时钟），开启 `~/.claude/settings.json` 官方沙盒与去遥测 | IP 与客户端时区打架、Agent 越权读写或多余遥测外联 |
-| **⑥ 状态栏实时雷达（`Claude Guard.app`）** | 原生 Swift 编译（<15MB 内存），每 15 秒自动巡检双通道 IP、OAuth 锁、原版隔离与沙盒状态，正常显示 `🟢 LA Safe`，异常秒变 `🔴 IP 异常!` | 后台节点悄悄漂移时肉眼无感知 |
+| **⑥ 商业级 SwiftUI 状态栏雷达（`Claude Guard.app` v2.0）** | 原生 SwiftUI 毛玻璃 Popover（<20MB 内存），随 `Claude Safe.app` 自动常驻；每 15 秒实时巡检双通道 IP + 延迟测速 + 6 层防线矩阵，内置 **IP 漂移自动急停（Auto-Kill）**、一键聚焦/急停与诊断复制 | 后台节点悄悄漂移时肉眼无感知，或巡检异常未及时阻断 |
 
 ---
 

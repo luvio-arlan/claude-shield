@@ -13,7 +13,7 @@
 3. **原版防误触隐藏 + 零跳动安全壳**：自动把原版 `Claude.app` 移入隐藏隔离仓（禁止 Spotlight 索引、保留官方签名），`/Applications` 只留 `LSUIElement=true` 零跳动的 `Claude Safe.app`。
 4. **OAuth 强制拦截（AdsPower-Only）**：拦截 `claude.ai` / `anthropic.com` 系统浏览器弹窗，自动复制授权链接到剪贴板，强制走指纹浏览器完成闭环。
 5. **进程级时区 & 语言伪装 + 官方 Seatbelt 沙盒**：强制注入 `TZ=America/Los_Angeles`、`en-US`（不动 Mac 系统时钟），开启 `~/.claude/settings.json` 沙盒与去遥测。
-6. **原生 Swift 状态栏实时雷达（`Claude Guard.app`）**：常驻 macOS 顶部菜单栏，每 15 秒自动巡检双通道 IP、OAuth 锁、原版隐藏与沙盒状态——安全显示 `🟢 LA Safe`，异常秒变 `🔴 IP 异常!`。
+6. **商业级原生 SwiftUI 状态栏雷达（`Claude Guard.app` v2.0）**：随 `Claude Safe.app` 打开自动常驻顶部状态栏，毛玻璃 Popover 面板实时显示双通道 IP + 毫秒级测速延迟、6 项防线评分矩阵、进程 PID、**IP 漂移自动急停（Fail-Closed Auto-Kill）开关**、一键聚焦/紧急急停与诊断报告复制。
 
 ## 一键部署
 
