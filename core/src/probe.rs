@@ -216,6 +216,12 @@ pub async fn probe_trace_channel(client: &Client, primary_url: &str, measure_rtt
 const API_PROBE_URL: &str = "https://api.anthropic.com/";
 const API_WARM_SAMPLES: usize = 4;
 const API_SAMPLE_PACING_MS: u64 = 25;
+/// Cloudflare / Anthropic edges typically close idle HTTP/2 connections after 30–60s.
+/// Only treat a pooled connection as already warm if used within this conservative window.
+const WARM_CONN_TTL: Duration = Duration::from_secs(20);
+/// If a supposedly warm 1-RTT request exceeds this threshold, assume the server closed the
+/// idle socket and forced a fresh TCP+TLS handshake, so perform one follow-up warm sample.
+const RECONNECT_SUSPECT_MS: u64 = 550;
 
 struct ApiWarmupState {
     cold_connect_ms: u64,
@@ -267,8 +273,12 @@ async fn warmup_anthropic_api(client: &Client) -> Option<ApiWarmupState> {
     })
 }
 
-async fn sample_anthropic_api_warm_rtt(client: &Client, warm: Option<ApiWarmupState>) -> ApiLatencyMetrics {
-    let Some(warm) = warm else {
+async fn sample_anthropic_api_warm_rtt(
+    client: &Client,
+    warm: Option<ApiWarmupState>,
+    verify_warm_first: bool,
+) -> ApiLatencyMetrics {
+    let Some(mut warm) = warm else {
         return ApiLatencyMetrics {
             warm_rtt_ms: None,
             cold_connect_ms: None,
@@ -278,14 +288,38 @@ async fn sample_anthropic_api_warm_rtt(client: &Client, warm: Option<ApiWarmupSt
     };
 
     let mut samples: Vec<u64> = Vec::with_capacity(API_WARM_SAMPLES);
-    for idx in 0..API_WARM_SAMPLES {
-        if idx > 0 {
+    if verify_warm_first {
+        let t0 = Instant::now();
+        if let Ok(r) = client.head(API_PROBE_URL).send().await {
+            warm.status_code = Some(r.status().as_u16());
+            let _ = r.bytes().await;
+            let first_ms = t0.elapsed().as_millis().max(1) as u64;
+            if first_ms >= RECONNECT_SUSPECT_MS {
+                // Server had closed idle H2 socket; treat this request as fresh warmup
+                warm.cold_connect_ms = first_ms;
+            } else {
+                samples.push(first_ms);
+            }
+        } else {
+            return ApiLatencyMetrics {
+                warm_rtt_ms: None,
+                cold_connect_ms: None,
+                jitter_ms: None,
+                status_code: None,
+            };
+        }
+    }
+
+    while samples.len() < API_WARM_SAMPLES {
+        if !samples.is_empty() {
             tokio::time::sleep(Duration::from_millis(API_SAMPLE_PACING_MS)).await;
         }
         let t = Instant::now();
         if let Ok(r) = client.head(API_PROBE_URL).send().await {
             let _ = r.bytes().await;
             samples.push(t.elapsed().as_millis().max(1) as u64);
+        } else {
+            break;
         }
     }
 
@@ -329,9 +363,15 @@ pub async fn quick_gate_probe(cfg: &ShieldConfig) -> (ChannelProbe, ChannelProbe
 }
 
 /// Single-request trace probe for low-power background keep-alive monitoring.
-/// Reuses existing HTTP/2 keep-alive streams on persistent worker clients so a single
-/// 196-byte trace GET simultaneously verifies exit IP, colo/loc, and wire RTT.
-pub async fn probe_trace_channel_single(client: &Client, primary_url: &str) -> ChannelProbe {
+/// When `assume_warm` is false (connection may have gone idle >20s), the request timing can
+/// include a cold TCP+TLS handshake, so `latency_ms` is preserved from `fallback_warm_rtt`
+/// instead of reporting a misleading cold-connect spike.
+pub async fn probe_trace_channel_single(
+    client: &Client,
+    primary_url: &str,
+    assume_warm: bool,
+    fallback_warm_rtt: Option<u64>,
+) -> ChannelProbe {
     let trace_urls: [&str; 2] = if primary_url.contains("1.1.1.1") {
         [primary_url, "https://www.cloudflare.com/cdn-cgi/trace"]
     } else {
@@ -346,9 +386,23 @@ pub async fn probe_trace_channel_single(client: &Client, primary_url: &str) -> C
                     let elapsed = t0.elapsed().as_millis().max(1) as u64;
                     let trace = parse_cf_trace(&body);
                     if is_valid_ip_str(&trace.ip) {
+                        let calibrated_rtt = if assume_warm && elapsed < RECONNECT_SUSPECT_MS {
+                            Some(elapsed)
+                        } else if let Some(prev) = fallback_warm_rtt {
+                            Some(prev)
+                        } else {
+                            // First-ever measurement on a cold socket: take 1 warm follow-up GET
+                            let t1 = Instant::now();
+                            if let Ok(r2) = client.get(trace_url).send().await {
+                                let _ = r2.bytes().await;
+                                Some(t1.elapsed().as_millis().max(1) as u64)
+                            } else {
+                                Some(elapsed)
+                            }
+                        };
                         return ChannelProbe {
                             ip: trace.ip,
-                            latency_ms: Some(elapsed),
+                            latency_ms: calibrated_rtt,
                             colo: trace.colo,
                             loc: trace.loc,
                             tls: trace.tls,
@@ -369,9 +423,15 @@ pub async fn probe_trace_channel_single(client: &Client, primary_url: &str) -> C
                 if let Ok(text) = resp.text().await {
                     let ip = text.trim().to_string();
                     if is_valid_ip_str(&ip) {
+                        let elapsed = t0.elapsed().as_millis().max(1) as u64;
+                        let rtt = if assume_warm && elapsed < RECONNECT_SUSPECT_MS {
+                            Some(elapsed)
+                        } else {
+                            fallback_warm_rtt.or(Some(elapsed))
+                        };
                         return ChannelProbe {
                             ip,
-                            latency_ms: Some(t0.elapsed().as_millis().max(1) as u64),
+                            latency_ms: rtt,
                             colo: None,
                             loc: None,
                             tls: None,
@@ -388,14 +448,25 @@ pub async fn probe_trace_channel_single(client: &Client, primary_url: &str) -> C
     ChannelProbe::unreachable()
 }
 
-/// Persistent HTTP/2 + TLS 1.3 connection pool shared across probes in worker mode.
-/// Automatically rebuilds proxy clients when `proxy_port` changes and supports explicit
-/// resets on macOS wake / network path changes to drop stale half-open sockets.
+fn is_connection_fresh(last_used: Option<Instant>, now: Instant) -> bool {
+    last_used
+        .map(|ts| now.saturating_duration_since(ts) < WARM_CONN_TTL)
+        .unwrap_or(false)
+}
+
+/// Persistent HTTP/2 + TLS 1.3 connection pool shared across probes in worker / FFI mode.
+/// Tracks per-channel warm freshness so cold TCP+TLS handshakes after idle timeouts never
+/// pollute calibrated 1-RTT latency readings.
 pub struct ProbePool {
     proxy_port: u16,
     proxy_cf: Option<Client>,
     proxy_api: Option<Client>,
     direct_v4: Option<Client>,
+    last_cf_used: Option<Instant>,
+    last_tun_used: Option<Instant>,
+    last_api_used: Option<Instant>,
+    last_cf_rtt_ms: Option<u64>,
+    last_tun_rtt_ms: Option<u64>,
     last_api_warm: Option<ApiWarmupState>,
     last_api_latency: Option<ApiLatencyMetrics>,
 }
@@ -407,6 +478,11 @@ impl ProbePool {
             proxy_cf: None,
             proxy_api: None,
             direct_v4: None,
+            last_cf_used: None,
+            last_tun_used: None,
+            last_api_used: None,
+            last_cf_rtt_ms: None,
+            last_tun_rtt_ms: None,
             last_api_warm: None,
             last_api_latency: None,
         };
@@ -424,26 +500,56 @@ impl ProbePool {
             self.proxy_port = cfg.proxy_port;
             self.proxy_cf = build_proxy_client(cfg, 5).ok();
             self.proxy_api = build_proxy_client(cfg, 5).ok();
+            self.last_cf_used = None;
+            self.last_api_used = None;
             self.last_api_warm = None;
-            if port_changed {
+            if force_reset || port_changed {
+                self.last_cf_rtt_ms = None;
                 self.last_api_latency = None;
             }
         }
         if force_reset || self.direct_v4.is_none() {
             self.direct_v4 = build_direct_v4_client(5).ok();
+            self.last_tun_used = None;
+            if force_reset {
+                self.last_tun_rtt_ms = None;
+            }
         }
     }
 
-    /// Background light telemetry: 2 warm HTTP/2 trace GETs in parallel (zero API RTT burst).
+    /// Background light telemetry: 2 trace GETs in parallel (zero API RTT burst),
+    /// preserving calibrated warm 1-RTT instead of reporting idle cold-handshake spikes.
     pub async fn probe_light(&mut self, cfg: &ShieldConfig, reset_pool: bool) -> NetworkProbeResult {
         self.ensure_clients(cfg, reset_pool);
+        let now = Instant::now();
+        let cf_warm = is_connection_fresh(self.last_cf_used, now);
+        let tun_warm = is_connection_fresh(self.last_tun_used, now);
+        let prev_cf_rtt = self.last_cf_rtt_ms;
+        let prev_tun_rtt = self.last_tun_rtt_ms;
+
         let (claude_edge, tun) = match (self.proxy_cf.as_ref(), self.direct_v4.as_ref()) {
             (Some(pc), Some(dc)) => tokio::join!(
-                probe_trace_channel_single(pc, "https://claude.ai/cdn-cgi/trace"),
-                probe_trace_channel_single(dc, "https://1.1.1.1/cdn-cgi/trace")
+                probe_trace_channel_single(pc, "https://claude.ai/cdn-cgi/trace", cf_warm, prev_cf_rtt),
+                probe_trace_channel_single(dc, "https://1.1.1.1/cdn-cgi/trace", tun_warm, prev_tun_rtt)
             ),
             _ => (ChannelProbe::unreachable(), ChannelProbe::unreachable()),
         };
+
+        let done = Instant::now();
+        if claude_edge.reachable {
+            self.last_cf_used = Some(done);
+            self.last_cf_rtt_ms = claude_edge.latency_ms;
+        } else {
+            self.last_cf_used = None;
+            self.last_cf_rtt_ms = None;
+        }
+        if tun.reachable {
+            self.last_tun_used = Some(done);
+            self.last_tun_rtt_ms = tun.latency_ms;
+        } else {
+            self.last_tun_used = None;
+            self.last_tun_rtt_ms = None;
+        }
 
         let api_latency = if claude_edge.reachable && claude_edge.ip == cfg.expected_ip {
             self.last_api_latency.clone().unwrap_or(ApiLatencyMetrics {
@@ -455,6 +561,7 @@ impl ProbePool {
         } else {
             self.last_api_latency = None;
             self.last_api_warm = None;
+            self.last_api_used = None;
             ApiLatencyMetrics {
                 warm_rtt_ms: None,
                 cold_connect_ms: None,
@@ -471,10 +578,16 @@ impl ProbePool {
         }
     }
 
-    /// Foreground full telemetry: warm CF/TUN probes + calibrated Anthropic API 1-RTT & jitter.
+    /// Foreground full telemetry: strictly calibrated warm 1-RTT for CF, TUN, and Anthropic API.
+    /// Any channel idle >= 20s automatically re-warms before measuring so cold TCP+TLS handshakes
+    /// never inflate latency or jitter.
     pub async fn probe_full(&mut self, cfg: &ShieldConfig, reset_pool: bool) -> NetworkProbeResult {
         self.ensure_clients(cfg, reset_pool);
         let err_probe = ChannelProbe::unreachable();
+        let now = Instant::now();
+        let cf_fresh = is_connection_fresh(self.last_cf_used, now);
+        let tun_fresh = is_connection_fresh(self.last_tun_used, now);
+        let api_fresh = self.last_api_warm.is_some() && is_connection_fresh(self.last_api_used, now);
 
         let (claude_edge, tun, api_latency) = match (
             self.proxy_cf.as_ref(),
@@ -482,34 +595,63 @@ impl ProbePool {
             self.direct_v4.as_ref(),
         ) {
             (Some(pc_cf), Some(pc_api), Some(dc)) => {
-                let need_api_warm = self.last_api_warm.is_none();
-                let (claude_edge, tun, api_warm) = if need_api_warm {
-                    let (ce, t, w) = tokio::join!(
-                        probe_trace_channel(pc_cf, "https://claude.ai/cdn-cgi/trace", true),
-                        probe_trace_channel(dc, "https://1.1.1.1/cdn-cgi/trace", true),
-                        warmup_anthropic_api(pc_api)
-                    );
-                    (ce, t, w)
-                } else {
-                    let (ce, t) = tokio::join!(
-                        probe_trace_channel_single(pc_cf, "https://claude.ai/cdn-cgi/trace"),
-                        probe_trace_channel_single(dc, "https://1.1.1.1/cdn-cgi/trace")
-                    );
-                    let warm_cached = self.last_api_warm.as_ref().map(|w| ApiWarmupState {
-                        cold_connect_ms: w.cold_connect_ms,
-                        status_code: w.status_code,
-                    });
-                    (ce, t, warm_cached)
-                };
+                let (claude_edge, tun, api_warm) = tokio::join!(
+                    async {
+                        if cf_fresh {
+                            let p = probe_trace_channel_single(pc_cf, "https://claude.ai/cdn-cgi/trace", true, None).await;
+                            if p.reachable && p.latency_ms.map(|ms| ms < RECONNECT_SUSPECT_MS).unwrap_or(false) {
+                                return p;
+                            }
+                        }
+                        probe_trace_channel(pc_cf, "https://claude.ai/cdn-cgi/trace", true).await
+                    },
+                    async {
+                        if tun_fresh {
+                            let p = probe_trace_channel_single(dc, "https://1.1.1.1/cdn-cgi/trace", true, None).await;
+                            if p.reachable && p.latency_ms.map(|ms| ms < RECONNECT_SUSPECT_MS).unwrap_or(false) {
+                                return p;
+                            }
+                        }
+                        probe_trace_channel(dc, "https://1.1.1.1/cdn-cgi/trace", true).await
+                    },
+                    async {
+                        if api_fresh {
+                            self.last_api_warm.as_ref().map(|w| ApiWarmupState {
+                                cold_connect_ms: w.cold_connect_ms,
+                                status_code: w.status_code,
+                            })
+                        } else {
+                            warmup_anthropic_api(pc_api).await
+                        }
+                    }
+                );
 
-                let api_latency = sample_anthropic_api_warm_rtt(pc_api, api_warm).await;
+                // Phase 2: sample warmed HTTP/2 API RTT on a quiet proxy tunnel
+                let api_latency = sample_anthropic_api_warm_rtt(pc_api, api_warm, api_fresh).await;
+                let done = Instant::now();
+                if claude_edge.reachable {
+                    self.last_cf_used = Some(done);
+                    self.last_cf_rtt_ms = claude_edge.latency_ms;
+                } else {
+                    self.last_cf_used = None;
+                    self.last_cf_rtt_ms = None;
+                }
+                if tun.reachable {
+                    self.last_tun_used = Some(done);
+                    self.last_tun_rtt_ms = tun.latency_ms;
+                } else {
+                    self.last_tun_used = None;
+                    self.last_tun_rtt_ms = None;
+                }
                 if api_latency.warm_rtt_ms.is_some() {
+                    self.last_api_used = Some(done);
                     self.last_api_warm = Some(ApiWarmupState {
                         cold_connect_ms: api_latency.cold_connect_ms.unwrap_or(0),
                         status_code: api_latency.status_code,
                     });
                     self.last_api_latency = Some(api_latency.clone());
                 } else {
+                    self.last_api_used = None;
                     self.last_api_warm = None;
                     self.last_api_latency = None;
                 }
@@ -572,7 +714,19 @@ pub async fn light_telemetry_probe(cfg: &ShieldConfig) -> NetworkProbeResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_robust_latency, is_valid_ip_str, parse_cf_trace, ChannelProbe};
+    use super::{
+        compute_robust_latency, is_connection_fresh, is_valid_ip_str, parse_cf_trace, ChannelProbe,
+        WARM_CONN_TTL,
+    };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn connection_freshness_expires_after_warm_ttl() {
+        let t0 = Instant::now();
+        assert!(!is_connection_fresh(None, t0));
+        assert!(is_connection_fresh(Some(t0), t0 + Duration::from_secs(5)));
+        assert!(!is_connection_fresh(Some(t0), t0 + WARM_CONN_TTL));
+    }
 
     #[test]
     fn robust_latency_suppresses_single_outlier_spike() {
