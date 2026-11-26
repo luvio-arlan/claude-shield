@@ -30,7 +30,7 @@
 | 防线 | 机制 | 解决什么痛点 |
 | :--- | :--- | :--- |
 | **① 双通道 IP 门禁锁（Kill-Switch）** | 启动前并行校验本地代理端口（如 `:7897`）与系统默认路由（TUN）出口 IP，必须严格等于白名单独享 IP | 忘开代理、TUN 异常退出或误切机场节点导致裸连 |
-| **② 运行中硬代理绑定 + 零泄漏网络隔离** | CLI 注入 `HTTP/HTTPS/ALL_PROXY`；桌面版注入 `--proxy-server` + `--host-resolver-rules`（防本地 DNS 泄漏）+ `--disable-quic`（防 UDP/QUIC 绕过）+ `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` | 运行中途代理崩溃回退直连，或 Electron 通过 DNS/QUIC/WebRTC 悄悄漏出真实 IP |
+| **② 运行中硬代理绑定 + 零泄漏网络隔离** | CLI 注入 `HTTP/HTTPS/ALL_PROXY`；桌面版注入 `--proxy-server` + `--disable-quic`（防 UDP/QUIC 绕过）+ `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`（配合 TUN + Fake-IP 封死 DNS 泄漏） | 运行中途代理崩溃回退直连，或 Electron 通过 QUIC/WebRTC 悄悄漏出真实 IP |
 | **③ 二合一原生 App + 原版防误触隐藏** | 自动将原版 `Claude.app` 移入隐藏仓 `~/.local/apps/`（禁 Spotlight 索引、保留官方签名）；`/Applications` 仅保留零跳动的 `Claude Shield.app` | 手滑点开原版客户端裸连，或在应用栏里出现两个割裂的图标 |
 | **④ OAuth 强制拦截（AdsPower-Only）** | 拦截 `open` / `$BROWSER` 对 `claude.ai` 与 `anthropic.com` 的拉起，自动复制授权链接到剪贴板 | 首次登录/续期时误弹宿主机浏览器导致环境关联 |
 | **⑤ 进程级时区/语言对齐 + Seatbelt 沙盒** | 动态注入目标时区与 `en-US`（不改动系统时钟），开启 `~/.claude/settings.json` 官方沙盒并禁用遥测 | IP 地区与客户端时区冲突、Agent 越权读写或多余遥测外联 |

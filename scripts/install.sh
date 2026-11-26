@@ -177,17 +177,27 @@ fi
 
 # Launch with hardened Electron network isolation:
 # - Hard proxy binding (fail-closed)
-# - Zero local DNS leak (--host-resolver-rules)
 # - Zero UDP/QUIC bypass (--disable-quic)
 # - Zero WebRTC non-proxied UDP leak
+# Note: avoid --host-resolver-rules as Claude Desktop rejects network-override switches; DNS is isolated by Clash TUN + Fake-IP.
+LAUNCH_LOG="$(mktemp)"
 nohup "${CLAUDE_APP}/Contents/MacOS/Claude" \
   --proxy-server="http://127.0.0.1:${PROXY_PORT}" \
   --proxy-bypass-list="<-loopback>" \
-  --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1, EXCLUDE localhost" \
   --disable-quic \
   --force-webrtc-ip-handling-policy=disable_non_proxied_udp \
-  --lang="en-US" >/dev/null 2>&1 &
+  --lang="en-US" >"${LAUNCH_LOG}" 2>&1 &
+CLAUDE_PID=$!
 disown || true
+
+sleep 0.8
+if ! kill -0 "${CLAUDE_PID}" 2>/dev/null; then
+  err_detail="$(head -c 300 "${LAUNCH_LOG}" | tr '\n' ' ' | sed 's/"/\\"/g')"
+  rm -f "${LAUNCH_LOG}"
+  /usr/bin/osascript -e "display dialog \"⚠️ Claude 桌面版启动失败\\n\\n${err_detail}\" buttons {\"知道了\"} default button 1 with icon stop with title \"Claude Shield\"" >/dev/null 2>&1 || true
+  exit 1
+fi
+rm -f "${LAUNCH_LOG}"
 EOF
 
 chmod +x "$HOME/.local/bin/claude-guard.sh" "$HOME/.local/lib/claude-guard-bin/open" "$HOME/.local/bin/claude" "$HOME/.local/bin/claude-desktop-safe"
