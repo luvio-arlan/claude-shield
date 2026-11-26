@@ -53,12 +53,16 @@ final class ShieldViewModel: ObservableObject {
     private var updateTimer: Timer?
     private var pathMonitor: NWPathMonitor?
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var powerObserver: NSObjectProtocol?
+    private var vnodeWatchers: [VnodeWatcher] = []
+    private let mihomoMonitor = MihomoEventMonitor()
     private var lastPathSignature: String?
     private var consecutiveUnreachableCount = 0
     private var lastRefreshAt: Date?
     private var lastFullRefreshAt: Date?
     private var currentTimerInterval: TimeInterval?
     private var isSystemAsleep: Bool = false
+    private var isLowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
     private var isAuditingDefenses: Bool = false
 
     var isUIVisible: Bool { isPopoverVisible || isDashboardVisible }
@@ -77,8 +81,13 @@ final class ShieldViewModel: ObservableObject {
         purityTimer?.invalidate()
         updateTimer?.invalidate()
         pathMonitor?.cancel()
+        mihomoMonitor.stop()
+        for w in vnodeWatchers { w.stop() }
         for observer in workspaceObservers {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        if let pObs = powerObserver {
+            NotificationCenter.default.removeObserver(pObs)
         }
     }
 
@@ -113,10 +122,15 @@ final class ShieldViewModel: ObservableObject {
         if isUIVisible {
             return 15.0
         }
+        let hasEventWatch = mihomoMonitor.hasRealtimeWatch
         if snapshot.desktopRunning || !snapshot.isSafe {
-            return 25.0
+            if isLowPowerMode { return 45.0 }
+            return hasEventWatch ? 45.0 : 25.0
         }
-        return 60.0
+        if isLowPowerMode {
+            return 180.0
+        }
+        return hasEventWatch ? 120.0 : 60.0
     }
 
     private func rescheduleTimer() {
@@ -287,8 +301,70 @@ final class ShieldViewModel: ObservableObject {
                 }
             }
         }
-        monitor.start(queue: DispatchQueue.global(qos: .utility))
+        monitor.start(queue: DispatchQueue.global(qos: .background))
         self.pathMonitor = monitor
+
+        // Low Power Mode adaptive throttling
+        if let existingPower = powerObserver {
+            NotificationCenter.default.removeObserver(existingPower)
+        }
+        powerObserver = NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self else { return }
+                self.isLowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+                self.rescheduleTimer()
+            }
+        }
+
+        // Kernel kqueue VNODE watchers (0% idle CPU, Apple Silicon E-Core queue)
+        for w in vnodeWatchers { w.stop() }
+        vnodeWatchers.removeAll()
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        let appsWatcher = VnodeWatcher(path: "/Applications", debounceInterval: 0.40) { [weak self] in
+            Task { @MainActor in
+                guard let self = self, !self.isSystemAsleep else { return }
+                if FileManager.default.fileExists(atPath: "/Applications/Claude.app") {
+                    self.auditDefensesImmediately()
+                }
+            }
+        }
+        if appsWatcher.start() { vnodeWatchers.append(appsWatcher) }
+
+        let configDir = "\(homePath)/.config/claude-guard"
+        if FileManager.default.fileExists(atPath: configDir) {
+            let cfgWatcher = VnodeWatcher(path: configDir, debounceInterval: 0.50) { [weak self] in
+                Task { @MainActor in
+                    guard let self = self, !self.isSystemAsleep else { return }
+                    self.auditDefensesImmediately()
+                }
+            }
+            if cfgWatcher.start() { vnodeWatchers.append(cfgWatcher) }
+        }
+
+        let claudeDir = "\(homePath)/.claude"
+        if FileManager.default.fileExists(atPath: claudeDir) {
+            let settingsWatcher = VnodeWatcher(path: claudeDir, debounceInterval: 0.50) { [weak self] in
+                Task { @MainActor in
+                    guard let self = self, !self.isSystemAsleep else { return }
+                    self.auditDefensesImmediately()
+                }
+            }
+            if settingsWatcher.start() { vnodeWatchers.append(settingsWatcher) }
+        }
+
+        // Dual-layer Clash Verge Rev / Mihomo real-time proxy switch & TUN monitor
+        mihomoMonitor.start { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self, !self.isSystemAsleep else { return }
+                let mode: TelemetryProbeMode = self.isUIVisible ? .full : .light
+                self.refresh(force: true, mode: mode, resetPool: true)
+            }
+        }
+        rescheduleTimer()
     }
 
     func auditDefensesImmediately() {
@@ -333,7 +409,7 @@ final class ShieldViewModel: ObservableObject {
             lastFullRefreshAt = Date()
         }
         isRefreshing = true
-        let priority: TaskPriority = isUIVisible || force ? .userInitiated : .utility
+        let priority: TaskPriority = isUIVisible || force ? .userInitiated : .background
         Task.detached(priority: priority) {
             let result = RustCoreBridge.fetchTelemetry(mode: resolvedMode, resetPool: resetPool)
             await MainActor.run {

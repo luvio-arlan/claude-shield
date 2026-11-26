@@ -1,60 +1,22 @@
-mod config;
-mod detect;
-mod guard;
-mod patrol;
-mod probe;
-mod proc_audit;
-mod purity;
-mod purity_score;
-mod setup;
-mod uninstall;
-mod worker;
-
-use chrono::Local;
-use config::{tz_short_and_full, ShieldConfig};
-use detect::detect_environment;
-use guard::{audit_local_defenses, escape_applescript, hide_original_claude_app, kill_claude_desktop, LocalDefenseAudit};
-use patrol::run_daily_patrol;
-use probe::{
-    full_telemetry_probe, light_telemetry_probe, quick_gate_probe, ApiLatencyMetrics, ChannelProbe,
-    NetworkProbeResult,
+use claude_shield_core::config::ShieldConfig;
+use claude_shield_core::detect::detect_environment;
+use claude_shield_core::guard::{
+    audit_local_defenses, escape_applescript, hide_original_claude_app, kill_claude_desktop,
 };
-use purity::run_purity_audit;
-use serde::Serialize;
-use setup::{run_setup, SetupOptions};
+use claude_shield_core::patrol::{self, run_daily_patrol};
+use claude_shield_core::pf_guard::{
+    disable_pf_guard, enable_pf_guard, generate_anchor_rules, pf_guard_status,
+};
+use claude_shield_core::probe::{full_telemetry_probe, light_telemetry_probe, quick_gate_probe};
+use claude_shield_core::purity::run_purity_audit;
+use claude_shield_core::setup::{run_setup, SetupOptions};
+use claude_shield_core::uninstall::run_uninstall;
+use claude_shield_core::worker;
+use claude_shield_core::{build_telemetry_payload, evaluate_gate_with_probes, GateJson};
 use std::env;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use uninstall::run_uninstall;
-
-#[derive(Serialize)]
-pub(crate) struct TelemetryJson {
-    pub(crate) expected_ip: String,
-    pub(crate) proxy_port: u16,
-    pub(crate) target_tz: String,
-    pub(crate) region_short: String,
-    pub(crate) region_full: String,
-    pub(crate) proxy: ChannelProbe,
-    pub(crate) tun: ChannelProbe,
-    pub(crate) claude_edge: ChannelProbe,
-    pub(crate) api_latency: ApiLatencyMetrics,
-    pub(crate) defenses: LocalDefenseAudit,
-    pub(crate) checked_at: String,
-}
-
-#[derive(Serialize)]
-pub(crate) struct GateJson {
-    pub(crate) ok: bool,
-    pub(crate) error: Option<String>,
-    pub(crate) expected_ip: String,
-    pub(crate) proxy_ip: String,
-    pub(crate) tun_ip: String,
-    pub(crate) claude_edge_ip: String,
-    pub(crate) claude_loc: Option<String>,
-    pub(crate) claude_colo: Option<String>,
-    pub(crate) elapsed_ms: u64,
-}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -72,6 +34,10 @@ async fn main() {
         "defenses" => {
             let defenses = audit_local_defenses(&cfg);
             println!("{}", serde_json::to_string(&defenses).unwrap_or_default());
+        }
+        "pf-guard" => {
+            let action = args.get(2).map(|s| s.as_str()).unwrap_or("status");
+            cmd_pf_guard(&cfg, action, json_mode);
         }
         "gate" => cmd_gate(&cfg, json_mode).await,
         "purity" => cmd_purity(&cfg, json_mode).await,
@@ -182,7 +148,7 @@ async fn main() {
         }
         _ => {
             println!("Claude Shield Core v{} (Native Rust Engine)", env!("CARGO_PKG_VERSION"));
-            println!("Usage: claude-shield-core <worker|telemetry|defenses|gate|purity|patrol|hide-original|detect|setup|uninstall|exec-cli|launch-desktop> [--json]");
+            println!("Usage: claude-shield-core <worker|telemetry|defenses|pf-guard|gate|purity|patrol|hide-original|detect|setup|uninstall|exec-cli|launch-desktop> [--json]");
         }
     }
 }
@@ -191,26 +157,58 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
-pub(crate) fn build_telemetry_payload(
-    cfg: &ShieldConfig,
-    net: NetworkProbeResult,
-    defenses: LocalDefenseAudit,
-) -> TelemetryJson {
-    let (region_short, region_full) = tz_short_and_full(&cfg.target_tz);
-    let checked_at = Local::now().format("%H:%M:%S").to_string();
-
-    TelemetryJson {
-        expected_ip: cfg.expected_ip.clone(),
-        proxy_port: cfg.proxy_port,
-        target_tz: cfg.target_tz.clone(),
-        region_short,
-        region_full,
-        proxy: net.proxy,
-        tun: net.tun,
-        claude_edge: net.claude_edge,
-        api_latency: net.api_latency,
-        defenses,
-        checked_at,
+fn cmd_pf_guard(cfg: &ShieldConfig, action: &str, json_mode: bool) {
+    match action {
+        "generate" => {
+            print!("{}", generate_anchor_rules(cfg));
+        }
+        "enable" => match enable_pf_guard(cfg) {
+            Ok(msg) => {
+                if json_mode {
+                    println!("{}", serde_json::json!({ "ok": true, "message": msg }));
+                } else {
+                    println!("✅ {}", msg);
+                }
+            }
+            Err(err) => {
+                if json_mode {
+                    println!("{}", serde_json::json!({ "ok": false, "error": err }));
+                } else {
+                    eprintln!("❌ {}", err);
+                }
+                std::process::exit(1);
+            }
+        },
+        "disable" => match disable_pf_guard() {
+            Ok(msg) => {
+                if json_mode {
+                    println!("{}", serde_json::json!({ "ok": true, "message": msg }));
+                } else {
+                    println!("✅ {}", msg);
+                }
+            }
+            Err(err) => {
+                if json_mode {
+                    println!("{}", serde_json::json!({ "ok": false, "error": err }));
+                } else {
+                    eprintln!("❌ {}", err);
+                }
+                std::process::exit(1);
+            }
+        },
+        _ => {
+            let status = pf_guard_status();
+            if json_mode {
+                println!("{}", serde_json::to_string(&status).unwrap_or_default());
+            } else {
+                println!(
+                    "PF Anchor {} — {} ({})",
+                    status.anchor_name,
+                    if status.active { "ACTIVE ✅" } else { "INACTIVE" },
+                    status.note
+                );
+            }
+        }
     }
 }
 
@@ -225,49 +223,6 @@ async fn cmd_telemetry(cfg: &ShieldConfig, light: bool) {
 
     cfg.write_cache_json("last_telemetry.json", &payload);
     println!("{}", serde_json::to_string(&payload).unwrap_or_default());
-}
-
-pub(crate) fn evaluate_gate_with_probes(
-    cfg: &ShieldConfig,
-    proxy: ChannelProbe,
-    tun: ChannelProbe,
-    edge: ChannelProbe,
-    elapsed_ms: u64,
-) -> GateJson {
-    let mut error = None;
-    if !cfg.is_ip_configured() {
-        error = Some("未配置白名单出口 IP (~/.config/claude-guard/expected_ip)。".to_string());
-    } else if !proxy.reachable {
-        error = Some(format!("本地代理 127.0.0.1:{} 无法连通 claude.ai。", cfg.proxy_port));
-    } else if proxy.ip != cfg.expected_ip {
-        error = Some(format!(
-            "代理/Claude 边缘出口 IP 异常（当前: {}，期望: {}）。",
-            proxy.ip, cfg.expected_ip
-        ));
-    } else if !tun.reachable {
-        error = Some("默认路由（TUN）无法连通外网。".to_string());
-    } else if tun.ip != cfg.expected_ip {
-        error = Some(format!(
-            "默认路由（TUN）出口 IP 异常（当前: {}，期望: {}）。",
-            tun.ip, cfg.expected_ip
-        ));
-    } else if let Some(ref loc) = edge.loc {
-        if matches!(loc.as_str(), "CN" | "HK" | "MO" | "RU" | "BY" | "KP" | "IR" | "SY" | "CU") {
-            error = Some(format!("Claude Cloudflare 边缘识别到封禁地区 ({})，已强制熔断！", loc));
-        }
-    }
-
-    GateJson {
-        ok: error.is_none(),
-        error,
-        expected_ip: cfg.expected_ip.clone(),
-        proxy_ip: proxy.ip,
-        tun_ip: tun.ip,
-        claude_edge_ip: edge.ip,
-        claude_loc: edge.loc,
-        claude_colo: edge.colo,
-        elapsed_ms,
-    }
 }
 
 async fn evaluate_gate(cfg: &ShieldConfig) -> GateJson {

@@ -29,7 +29,7 @@ struct WorkerResponse<T: Serialize> {
     error: Option<String>,
 }
 
-fn telemetry_cache_signature(t: &TelemetryJson) -> String {
+pub(crate) fn telemetry_cache_signature(t: &TelemetryJson) -> String {
     format!(
         "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         t.expected_ip,
@@ -53,7 +53,7 @@ fn telemetry_cache_signature(t: &TelemetryJson) -> String {
     )
 }
 
-fn should_flush_telemetry_cache(
+pub(crate) fn should_flush_telemetry_cache(
     prev_sig: Option<&str>,
     new_sig: &str,
     last_written: Option<Instant>,

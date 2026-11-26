@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="./assets/showcase-hero.png" width="100%" alt="Claude Shield v3.4 — macOS 原生 Studio 控制台与菜单栏雷达" />
+  <img src="./assets/showcase-hero.png" width="100%" alt="Claude Shield v3.5 — macOS 原生 Studio 控制台与菜单栏雷达" />
 </p>
 
 ---
@@ -60,7 +60,7 @@
 
 用虚拟机套娃（Lima / Docker）虽然能隔离，却动辄常驻 **2–4GB 内存**、拖慢本地文件 I/O、配置门槛极高。
 
-**Claude Shield v3.4** 用 **原生 Rust 核心引擎 + 原生 SwiftUI 菜单栏雷达 & Studio 控制台** 彻底解决这些问题：**下载 App、拖进应用程序、点一下「一键部署」**，无需命令行、无需安装 Rust/Xcode，静默后台 **0.0% CPU / ~22MB 内存**；不需要时 **一键卸载并 100% 还原原版应用与所有系统配置**。
+**Claude Shield v3.5** 用 **单进程内嵌 Rust FFI 核心 + 原生 SwiftUI 菜单栏雷达 & Studio 控制台** 彻底解决这些问题：**下载 App、拖进应用程序、点一下「一键部署」**，无需命令行、无需安装 Rust/Xcode，静默后台 **0.0% CPU / 单进程零子进程 / 毫秒级切节点熔断**；不需要时 **一键卸载并 100% 还原原版应用与所有系统配置**。
 
 ---
 
@@ -69,7 +69,7 @@
 ### 1. 下载安装
 
 前往 **[GitHub Releases 最新版本](https://github.com/luvio-arlan/claude-shield/releases/latest)** 下载：
-- **`Claude-Shield-v3.4.0-macOS-arm64.dmg`**（推荐，双击打开后拖入 `Applications` 文件夹即可）
+- **`Claude-Shield-v3.5.0-macOS-arm64.dmg`**（推荐，双击打开后拖入 `Applications` 文件夹即可）
 
 > **首次打开提示**：由于开源版本采用 Ad-hoc 本地签名（未购买 Apple 付费公证证书），首次打开若遇到 macOS 安全提示，请在终端执行一次即可永久放行：
 > ```bash
@@ -161,7 +161,7 @@ git clone https://github.com/luvio-arlan/claude-shield.git
 cd claude-shield
 
 # 打包独立的 macOS .app / .dmg / .zip（输出至 dist/）
-bash scripts/build-release.sh 3.4.0
+bash scripts/build-release.sh 3.5.0
 
 # 或直接通过命令行安装到本机
 bash scripts/install.sh \

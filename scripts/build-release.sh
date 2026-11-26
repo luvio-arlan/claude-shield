@@ -18,14 +18,17 @@ rm -rf "${DIST_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources" "${DMG_STAGING}"
 
 echo "🦀 [1/5] Building native Rust core engine v${VERSION} (release, LTO + strip)..."
-(cd "${REPO_ROOT}/core" && cargo build --release --quiet)
+(cd "${REPO_ROOT}/core" && MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --release --quiet)
 cp "${REPO_ROOT}/core/target/release/claude-shield-core" "${APP_DIR}/Contents/MacOS/claude-shield-core"
 chmod +x "${APP_DIR}/Contents/MacOS/claude-shield-core"
 
-echo "🦅 [2/5] Compiling native SwiftUI App (macOS 13.0+ ${ARCH})..."
+echo "🦅 [2/5] Compiling native SwiftUI App + static-linking Rust FFI (macOS 13.0+ ${ARCH})..."
 swiftc -O -target "${ARCH}-apple-macos13.0" \
+  -import-objc-header "${REPO_ROOT}/app/Sources/ClaudeShieldCore.h" \
   -framework Cocoa -framework SwiftUI -framework Network -framework QuartzCore \
+  -framework Security -framework SystemConfiguration \
   "${REPO_ROOT}/app/Sources/"*.swift \
+  "${REPO_ROOT}/core/target/release/libclaude_shield_core.a" \
   -o "${APP_DIR}/Contents/MacOS/ClaudeShield"
 chmod +x "${APP_DIR}/Contents/MacOS/ClaudeShield"
 

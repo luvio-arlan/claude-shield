@@ -68,11 +68,17 @@ enum RustCoreBridge {
     }
 
     static func fetchPurity() -> PurityReport? {
+        if let report = CoreWorkerClient.shared.fetchPurity() {
+            return report
+        }
         guard let data = runCore(["purity", "--json"]) else { return nil }
         return try? JSONDecoder().decode(PurityReport.self, from: data)
     }
 
     static func runPatrol(notify: Bool, autoKill: Bool) -> PatrolReportModel? {
+        if let report = CoreWorkerClient.shared.runPatrol(notify: notify, autoKill: autoKill) {
+            return report
+        }
         var args = ["patrol", "--json"]
         if notify { args.append("--notify") }
         if !autoKill { args.append("--no-kill") }
@@ -121,6 +127,9 @@ enum RustCoreBridge {
     }
 
     static func hideOriginalApp() -> [String] {
+        if let items = CoreWorkerClient.shared.hideOriginalApp() {
+            return items
+        }
         guard let data = runCore(["hide-original", "--json"]),
               let items = try? JSONDecoder().decode([String].self, from: data) else {
             return []
@@ -136,6 +145,9 @@ enum RustCoreBridge {
     }
 
     static func detectEnvironment(port: Int? = nil) -> DetectResultModel? {
+        if let res = CoreWorkerClient.shared.detectEnvironment(port: port) {
+            return res
+        }
         var args = ["detect", "--json"]
         if let port = port {
             args.append(contentsOf: ["--port", String(port)])

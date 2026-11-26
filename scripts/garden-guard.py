@@ -150,6 +150,25 @@ def check_swift_guardrails(errors: list[str]) -> None:
             errors.append(fail(code, f"Missing required macOS invariant `{needle}` in app/Sources/.", fix))
 
 
+    if not (APP_SOURCES_DIR / "ClaudeShieldCore.h").exists():
+        errors.append(
+            fail(
+                "SINGLE_PROCESS_FFI_HEADER",
+                "Missing app/Sources/ClaudeShieldCore.h C-ABI bridging header.",
+                "Keep ClaudeShieldCore.h so ClaudeShield static-links libclaude_shield_core.a in a single process.",
+            )
+        )
+    for sh_path in (BUILD_SH, INSTALL_SH):
+        if "libclaude_shield_core.a" not in sh_path.read_text(encoding="utf-8"):
+            errors.append(
+                fail(
+                    "SINGLE_PROCESS_FFI_LINK",
+                    f"{sh_path.relative_to(ROOT)} does not static-link libclaude_shield_core.a.",
+                    "Link core/target/release/libclaude_shield_core.a into ClaudeShield to maintain single-process architecture.",
+                )
+            )
+
+
 def check_rust_guardrails(errors: list[str]) -> None:
     main_rs = ROOT / "core" / "src" / "main.rs"
     if main_rs.exists() and 'flavor = "current_thread"' not in main_rs.read_text(encoding="utf-8"):

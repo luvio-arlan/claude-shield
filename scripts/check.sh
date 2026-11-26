@@ -19,7 +19,9 @@ echo "🦅 [4/4] Typechecking native macOS SwiftUI app..."
 if [[ "$(uname -s)" == "Darwin" ]]; then
   ARCH="$(uname -m)"
   swiftc -typecheck -target "${ARCH}-apple-macos13.0" \
+    -import-objc-header "${REPO_ROOT}/app/Sources/ClaudeShieldCore.h" \
     -framework Cocoa -framework SwiftUI -framework Network -framework QuartzCore \
+    -framework Security -framework SystemConfiguration \
     "${REPO_ROOT}/app/Sources/"*.swift
 else
   echo "ERROR: macOS (swiftc) is required to verify app/Sources/*.swift" >&2

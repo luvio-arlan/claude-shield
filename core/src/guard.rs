@@ -3,8 +3,63 @@ use crate::proc_audit::inspect_claude_processes;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
+
+struct CachedSettingsFlags {
+    path: PathBuf,
+    mtime: Option<SystemTime>,
+    len: u64,
+    sandbox_enabled: bool,
+    telemetry_disabled: bool,
+}
+
+fn read_settings_flags_cached(settings_path: &Path) -> (bool, bool) {
+    static CACHE: OnceLock<Mutex<Option<CachedSettingsFlags>>> = OnceLock::new();
+    let meta = fs::metadata(settings_path).ok();
+    let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+    let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some(ref entry) = *guard {
+            if entry.path == settings_path && entry.mtime == mtime && entry.len == len {
+                return (entry.sandbox_enabled, entry.telemetry_disabled);
+            }
+        }
+    }
+
+    let settings_text = fs::read_to_string(settings_path).unwrap_or_default();
+    let settings_json = serde_json::from_str::<serde_json::Value>(&settings_text).ok();
+    let sandbox_enabled = settings_json
+        .as_ref()
+        .and_then(|v| v.pointer("/sandbox/enabled"))
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let telemetry_disabled = settings_json
+        .as_ref()
+        .map(|v| {
+            v.pointer("/env/CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_some()
+                && v.pointer("/env/DISABLE_TELEMETRY").is_some()
+        })
+        .unwrap_or_else(|| {
+            settings_text.contains("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+                && settings_text.contains("DISABLE_TELEMETRY")
+        });
+
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(CachedSettingsFlags {
+            path: settings_path.to_path_buf(),
+            mtime,
+            len,
+            sandbox_enabled,
+            telemetry_disabled,
+        });
+    }
+    (sandbox_enabled, telemetry_disabled)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalDefenseAudit {
@@ -39,7 +94,7 @@ fn run_capture(bin: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-pub(crate) fn escape_applescript(s: &str) -> String {
+pub fn escape_applescript(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "'")
         .replace(['\r', '\n'], " ")
@@ -72,23 +127,7 @@ pub fn audit_local_defenses(cfg: &ShieldConfig) -> LocalDefenseAudit {
     let original_hidden = !orig_in_apps && orig_in_vault;
 
     let settings_path = cfg.home_dir.join(".claude/settings.json");
-    let settings_text = fs::read_to_string(&settings_path).unwrap_or_default();
-    let settings_json = serde_json::from_str::<serde_json::Value>(&settings_text).ok();
-    let sandbox_enabled = settings_json
-        .as_ref()
-        .and_then(|v| v.pointer("/sandbox/enabled"))
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
-    let telemetry_disabled = settings_json
-        .as_ref()
-        .map(|v| {
-            v.pointer("/env/CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_some()
-                && v.pointer("/env/DISABLE_TELEMETRY").is_some()
-        })
-        .unwrap_or_else(|| {
-            settings_text.contains("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-                && settings_text.contains("DISABLE_TELEMETRY")
-        });
+    let (sandbox_enabled, telemetry_disabled) = read_settings_flags_cached(&settings_path);
 
     let procs = inspect_claude_processes(cfg.proxy_port);
 

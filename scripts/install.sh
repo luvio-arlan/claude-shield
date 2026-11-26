@@ -44,7 +44,7 @@ mkdir -p "$HOME/.local/bin"
 CORE_BIN="$HOME/.local/bin/claude-shield-core"
 if command -v cargo >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/core/Cargo.toml" ]]; then
   echo "🦀 Building native Rust core engine v${VERSION} (claude-shield-core)..."
-  (cd "${REPO_ROOT}/core" && cargo build --release --quiet)
+  (cd "${REPO_ROOT}/core" && MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --release --quiet)
   cp "${REPO_ROOT}/core/target/release/claude-shield-core" "${CORE_BIN}"
   chmod +x "${CORE_BIN}"
   echo "✅ Built native Rust core: ${CORE_BIN}"
@@ -79,10 +79,13 @@ if command -v swiftc >/dev/null 2>&1 && compgen -G "${REPO_ROOT}/app/Sources/*.s
   rm -rf "${SHIELD_APP}"
   mkdir -p "${SHIELD_APP}/Contents/MacOS" "${SHIELD_APP}/Contents/Resources"
 
-  echo "🦅 Compiling native SwiftUI radar app (/Applications/Claude Shield.app)..."
+  echo "🦅 Compiling native SwiftUI radar app + static-linking Rust FFI (/Applications/Claude Shield.app)..."
   swiftc -O -target "$(uname -m)-apple-macos13.0" \
+    -import-objc-header "${REPO_ROOT}/app/Sources/ClaudeShieldCore.h" \
     -framework Cocoa -framework SwiftUI -framework Network -framework QuartzCore \
+    -framework Security -framework SystemConfiguration \
     "${REPO_ROOT}/app/Sources/"*.swift \
+    "${REPO_ROOT}/core/target/release/libclaude_shield_core.a" \
     -o "${SHIELD_APP}/Contents/MacOS/ClaudeShield"
 
   cp "${CORE_BIN}" "${SHIELD_APP}/Contents/MacOS/claude-shield-core"

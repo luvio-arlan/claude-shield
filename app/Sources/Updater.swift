@@ -11,7 +11,7 @@ enum AppReleaseConfig {
            !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return v.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return "3.4.0"
+        return "3.5.0"
     }
 
     static var shortDisplayVersion: String {

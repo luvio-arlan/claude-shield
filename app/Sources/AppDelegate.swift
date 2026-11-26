@@ -19,6 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var popoverLocalMonitor: Any?
     private var lastStatusState: MenuBarShieldState?
     private var lastStatusText: String?
+    private var lastStatusBaseKey: String?
+    private var lastStatusLatencyMs: Int?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let radarOnly = CommandLine.arguments.contains("--radar-only")
@@ -112,18 +114,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func applyStatusButtonFromSnapshot(_ snap: TelemetrySnapshot, purity: PurityReport?) {
         if snap.expected_ip == "检测中..." {
-            updateStatusButton(state: .loading, text: "Shield")
+            updateStatusButton(state: .loading, text: "Shield", baseKey: "loading", latencyMs: nil)
             return
         }
         if snap.isSafe {
             let bestMs = snap.api_latency.warm_rtt_ms ?? snap.proxy.latency_ms
             let msText = bestMs.map { " \($0)ms" } ?? ""
             let gradeText = purity.map { " · \($0.grade)" } ?? ""
-            updateStatusButton(state: .armed, text: "\(snap.region_short)\(msText)\(gradeText)")
+            let baseKey = "\(snap.region_short)\(gradeText)"
+            updateStatusButton(state: .armed, text: "\(snap.region_short)\(msText)\(gradeText)", baseKey: baseKey, latencyMs: bestMs)
         } else if snap.desktopUnprotected || snap.hasUnprotectedCLI {
-            updateStatusButton(state: .alert, text: "进程未受保护!")
+            updateStatusButton(state: .alert, text: "进程未受保护!", baseKey: "alert-proc", latencyMs: nil)
         } else {
-            updateStatusButton(state: .alert, text: "IP 异常!")
+            updateStatusButton(state: .alert, text: "IP 异常!", baseKey: "alert-ip", latencyMs: nil)
         }
     }
 
@@ -195,13 +198,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         dashboardController.show(viewModel: viewModel, section: dashboardController.currentSection, isFirstRun: false)
     }
 
-    private func updateStatusButton(state: MenuBarShieldState, text: String) {
+    private func updateStatusButton(state: MenuBarShieldState, text: String, baseKey: String, latencyMs: Int?) {
         if lastStatusState == state && lastStatusText == text {
+            return
+        }
+        // Hysteresis in background mode: skip tiny <15ms jitter redraws to avoid WindowServer wakeups
+        if !viewModel.isUIVisible,
+           state == .armed,
+           lastStatusState == .armed,
+           lastStatusBaseKey == baseKey,
+           let prevMs = lastStatusLatencyMs,
+           let nextMs = latencyMs,
+           abs(nextMs - prevMs) < 15 {
             return
         }
         guard let button = statusItem.button else { return }
         lastStatusState = state
         lastStatusText = text
+        lastStatusBaseKey = baseKey
+        lastStatusLatencyMs = latencyMs
         button.image = ShieldBrandGraphics.makeMenuBarIcon(state: state)
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .medium)
         let attrs: [NSAttributedString.Key: Any] = [
