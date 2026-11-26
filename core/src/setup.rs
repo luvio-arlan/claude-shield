@@ -1,30 +1,13 @@
 use crate::config::ShieldConfig;
+use crate::detect::find_real_claude_cli;
 use crate::guard::hide_original_claude_app;
-use crate::probe::{build_direct_v4_client, build_proxy_client, probe_trace_channel};
+use crate::uninstall::remove_launch_agent;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::net::{SocketAddr, TcpStream};
+use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DetectResult {
-    pub proxy_port: u16,
-    pub proxy_reachable: bool,
-    pub exit_ip: String,
-    pub tun_ip: String,
-    pub tun_matches: bool,
-    pub detected_tz: String,
-    pub country_code: String,
-    pub city: String,
-    pub isp: String,
-    pub claude_app_installed: bool,
-    pub claude_app_hidden: bool,
-    pub claude_cli_path: Option<String>,
-    pub already_configured: bool,
-}
 
 #[derive(Debug, Clone)]
 pub struct SetupOptions {
@@ -47,209 +30,42 @@ pub struct SetupReport {
     pub target_tz: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UninstallReport {
-    pub ok: bool,
-    pub restored: Vec<String>,
-    pub warnings: Vec<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct BackupMeta {
-    had_settings_file: bool,
-    had_sandbox_enabled: bool,
-    had_auto_allow_bash: bool,
+pub(crate) struct BackupMeta {
+    pub had_settings_file: bool,
+    pub had_sandbox_enabled: bool,
+    pub had_auto_allow_bash: bool,
 }
 
-fn is_port_open(port: u16) -> bool {
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    TcpStream::connect_timeout(&addr, Duration::from_millis(160)).is_ok()
+pub fn validate_ip_input(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let parsed: IpAddr = trimmed
+        .parse()
+        .map_err(|_| format!("白名单出口 IP 格式无效: {}", trimmed))?;
+    Ok(parsed.to_string())
 }
 
-pub fn find_real_claude_cli(home: &Path) -> Option<String> {
-    let self_wrapper = home.join(".local/bin/claude");
-    let guard_bin_dir = home.join(".local/lib/claude-guard-bin");
-
-    // 1. Scan PATH entries first
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
-            if dir.is_empty() {
-                continue;
-            }
-            let dir_path = Path::new(dir);
-            if dir_path == guard_bin_dir {
-                continue;
-            }
-            let cand = dir_path.join("claude");
-            if cand == self_wrapper {
-                continue;
-            }
-            if is_exec_and_not_shield(&cand) {
-                return Some(cand.to_string_lossy().to_string());
-            }
-        }
+pub fn validate_tz_input(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 64
+        || trimmed.starts_with('/')
+        || trimmed.contains("..")
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '+' | '-' | '.'))
+    {
+        return Err(format!("目标时区格式无效: {}", trimmed));
     }
-
-    // 2. Common macOS locations (GUI apps often have minimal PATH)
-    let common = [
-        "/opt/homebrew/bin/claude".to_string(),
-        "/usr/local/bin/claude".to_string(),
-        home.join(".npm-global/bin/claude").to_string_lossy().to_string(),
-        home.join(".volta/bin/claude").to_string_lossy().to_string(),
-        home.join(".bun/bin/claude").to_string_lossy().to_string(),
-        home.join(".claude/local/claude").to_string_lossy().to_string(),
-    ];
-    for c in &common {
-        let p = Path::new(c);
-        if is_exec_and_not_shield(p) {
-            return Some(c.clone());
-        }
-    }
-
-    None
+    Ok(trimmed.to_string())
 }
 
-fn is_exec_and_not_shield(path: &Path) -> bool {
-    let is_exec = fs::metadata(path)
-        .map(|m| m.is_file() && (m.permissions().mode() & 0o111 != 0))
-        .unwrap_or(false);
-    if !is_exec {
-        return false;
-    }
-    if let Ok(bytes) = fs::read(path) {
-        if bytes.len() < 8192 {
-            let text = String::from_utf8_lossy(&bytes);
-            if text.contains("claude-shield-core") || text.contains("claude-guard.sh") {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-pub async fn detect_environment(cfg: &ShieldConfig, preferred_port: Option<u16>) -> DetectResult {
-    let mut candidates: Vec<u16> = Vec::new();
-    if let Some(p) = preferred_port {
-        candidates.push(p);
-    }
-    for p in [cfg.proxy_port, 7897, 7890, 7891, 1087, 1080, 6152, 20171] {
-        if !candidates.contains(&p) {
-            candidates.push(p);
-        }
-    }
-
-    let chosen_port = candidates
-        .iter()
-        .copied()
-        .find(|&p| is_port_open(p))
-        .unwrap_or_else(|| preferred_port.unwrap_or(cfg.proxy_port));
-
-    let mut probe_cfg = cfg.clone();
-    probe_cfg.proxy_port = chosen_port;
-    let proxy_client = build_proxy_client(&probe_cfg, 5).ok();
-    let direct_client = build_direct_v4_client(5).ok();
-
-    let (proxy_probe, tun_probe) = tokio::join!(
-        async {
-            match proxy_client.as_ref() {
-                Some(c) => probe_trace_channel(c, "https://claude.ai/cdn-cgi/trace", false).await,
-                None => crate::probe::ChannelProbe::unreachable(),
-            }
-        },
-        async {
-            match direct_client.as_ref() {
-                Some(c) => probe_trace_channel(c, "https://1.1.1.1/cdn-cgi/trace", false).await,
-                None => crate::probe::ChannelProbe::unreachable(),
-            }
-        }
-    );
-
-    let exit_ip = if proxy_probe.reachable {
-        proxy_probe.ip.clone()
-    } else if tun_probe.reachable {
-        tun_probe.ip.clone()
-    } else {
-        String::new()
-    };
-
-    let tun_ip = if tun_probe.reachable {
-        tun_probe.ip.clone()
-    } else {
-        String::new()
-    };
-
-    let mut detected_tz = cfg.target_tz.clone();
-    let mut country_code = proxy_probe.loc.clone().unwrap_or_default();
-    let mut city = String::new();
-    let mut isp = String::new();
-
-    if !exit_ip.is_empty() {
-        if let Some(client) = proxy_client.as_ref().or(direct_client.as_ref()) {
-            let ip_api_url = format!(
-                "http://ip-api.com/json/{}?fields=status,countryCode,city,timezone,isp",
-                exit_ip
-            );
-            if let Ok(resp) = client.get(&ip_api_url).send().await {
-                if let Ok(val) = resp.json::<serde_json::Value>().await {
-                    if val.get("status").and_then(|s| s.as_str()) == Some("success") {
-                        if let Some(tz) = val.get("timezone").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
-                            detected_tz = tz.to_string();
-                        }
-                        if let Some(cc) = val.get("countryCode").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
-                            country_code = cc.to_string();
-                        }
-                        if let Some(c) = val.get("city").and_then(|s| s.as_str()) {
-                            city = c.to_string();
-                        }
-                        if let Some(i) = val.get("isp").and_then(|s| s.as_str()) {
-                            isp = i.to_string();
-                        }
-                    }
-                }
-            }
-            // Fallback to ipinfo.io if timezone still not enriched
-            if city.is_empty() {
-                let ipinfo_url = format!("https://ipinfo.io/{}/json", exit_ip);
-                if let Ok(resp) = client.get(&ipinfo_url).send().await {
-                    if let Ok(val) = resp.json::<serde_json::Value>().await {
-                        if let Some(tz) = val.get("timezone").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
-                            detected_tz = tz.to_string();
-                        }
-                        if let Some(cc) = val.get("country").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
-                            country_code = cc.to_string();
-                        }
-                        if let Some(c) = val.get("city").and_then(|s| s.as_str()) {
-                            city = c.to_string();
-                        }
-                        if let Some(org) = val.get("org").and_then(|s| s.as_str()) {
-                            isp = org.to_string();
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let orig_in_apps = Path::new("/Applications/Claude.app").exists();
-    let orig_in_vault = cfg.home_dir.join(".local/apps/Claude.app").exists();
-    let claude_app_installed = orig_in_apps || orig_in_vault;
-    let claude_app_hidden = !orig_in_apps && orig_in_vault;
-
-    DetectResult {
-        proxy_port: chosen_port,
-        proxy_reachable: proxy_probe.reachable,
-        exit_ip,
-        tun_ip: tun_ip.clone(),
-        tun_matches: proxy_probe.reachable && tun_probe.reachable && proxy_probe.ip == tun_ip,
-        detected_tz,
-        country_code,
-        city,
-        isp,
-        claude_app_installed,
-        claude_app_hidden,
-        claude_cli_path: find_real_claude_cli(&cfg.home_dir),
-        already_configured: cfg.is_ip_configured(),
-    }
+pub(crate) fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn write_executable(path: &Path, content: &str) -> Result<(), String> {
@@ -262,7 +78,7 @@ fn write_executable(path: &Path, content: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_shell_path_block(rc_path: &Path) -> Option<String> {
+pub(crate) fn ensure_shell_path_block(rc_path: &Path) -> Option<String> {
     const START_MARK: &str = "# >>> Claude Shield >>>";
     const END_MARK: &str = "# <<< Claude Shield <<<";
     let block = format!(
@@ -284,47 +100,13 @@ fn ensure_shell_path_block(rc_path: &Path) -> Option<String> {
     updated.push('\n');
 
     if fs::write(rc_path, updated).is_ok() {
-        Some(format!("已将 ~/.local/bin 注入 {}", rc_path.file_name().unwrap_or_default().to_string_lossy()))
+        Some(format!(
+            "已将 ~/.local/bin 注入 {}",
+            rc_path.file_name().unwrap_or_default().to_string_lossy()
+        ))
     } else {
         None
     }
-}
-
-fn remove_shell_path_block(rc_path: &Path) -> bool {
-    const START_MARK: &str = "# >>> Claude Shield >>>";
-    const END_MARK: &str = "# <<< Claude Shield <<<";
-    let Ok(content) = fs::read_to_string(rc_path) else {
-        return false;
-    };
-    if !content.contains(START_MARK) {
-        return false;
-    }
-
-    let mut out = Vec::new();
-    let mut skipping = false;
-    for line in content.lines() {
-        if line.trim() == START_MARK {
-            skipping = true;
-            continue;
-        }
-        if skipping {
-            if line.trim() == END_MARK {
-                skipping = false;
-            }
-            continue;
-        }
-        out.push(line);
-    }
-
-    // Trim extra trailing blank lines left behind
-    while out.last().map(|l| l.is_empty()).unwrap_or(false) {
-        out.pop();
-    }
-    let mut final_text = out.join("\n");
-    if !final_text.is_empty() {
-        final_text.push('\n');
-    }
-    fs::write(rc_path, final_text).is_ok()
 }
 
 fn get_uid() -> String {
@@ -360,24 +142,38 @@ fn install_launch_agent(plist_path: &Path, content: &str) -> bool {
     true
 }
 
-fn remove_launch_agent(plist_path: &Path) -> bool {
-    if !plist_path.exists() {
-        return false;
-    }
-    let uid = get_uid();
-    let gui = format!("gui/{}", uid);
-    let p = plist_path.to_string_lossy().to_string();
-    let _ = Command::new("/bin/launchctl")
-        .args(["bootout", &gui, &p])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    fs::remove_file(plist_path).is_ok()
-}
-
 pub fn run_setup(cfg: &ShieldConfig, opts: &SetupOptions) -> SetupReport {
     let mut actions = Vec::new();
     let mut warnings = Vec::new();
+
+    let clean_ip = match validate_ip_input(&opts.expected_ip) {
+        Ok(ip) => ip,
+        Err(err) => {
+            warnings.push(err);
+            return SetupReport {
+                ok: false,
+                actions,
+                warnings,
+                expected_ip: opts.expected_ip.trim().to_string(),
+                proxy_port: opts.proxy_port,
+                target_tz: opts.target_tz.trim().to_string(),
+            };
+        }
+    };
+    let clean_tz = match validate_tz_input(&opts.target_tz) {
+        Ok(tz) => tz,
+        Err(err) => {
+            warnings.push(err);
+            return SetupReport {
+                ok: false,
+                actions,
+                warnings,
+                expected_ip: clean_ip,
+                proxy_port: opts.proxy_port,
+                target_tz: opts.target_tz.trim().to_string(),
+            };
+        }
+    };
 
     let home = &cfg.home_dir;
     let config_dir = &cfg.config_dir;
@@ -392,19 +188,19 @@ pub fn run_setup(cfg: &ShieldConfig, opts: &SetupOptions) -> SetupReport {
         let _ = fs::create_dir_all(d);
     }
 
-    // 1. Write IP / Port / TZ config
-    let _ = fs::write(config_dir.join("expected_ip"), format!("{}\n", opts.expected_ip.trim()));
+    let _ = fs::write(config_dir.join("expected_ip"), format!("{}\n", clean_ip));
     let _ = fs::write(config_dir.join("proxy_port"), format!("{}\n", opts.proxy_port));
-    let _ = fs::write(config_dir.join("target_tz"), format!("{}\n", opts.target_tz.trim()));
+    let _ = fs::write(config_dir.join("target_tz"), format!("{}\n", clean_tz));
+    let _ = fs::write(
+        config_dir.join("hide_original"),
+        if opts.hide_original { "1\n" } else { "0\n" },
+    );
     let _ = fs::write(config_dir.join("setup_complete"), "1\n");
     actions.push(format!(
         "已锁定白名单出口 IP {} · 代理端口 :{} · 时区 {}",
-        opts.expected_ip.trim(),
-        opts.proxy_port,
-        opts.target_tz.trim()
+        clean_ip, opts.proxy_port, clean_tz
     ));
 
-    // 2. Sync Rust core binary to ~/.local/bin/claude-shield-core
     let core_dst = local_bin.join("claude-shield-core");
     if let Ok(cur_exe) = std::env::current_exe() {
         let same_file = fs::canonicalize(&cur_exe).ok() == fs::canonicalize(&core_dst).ok();
@@ -418,13 +214,11 @@ pub fn run_setup(cfg: &ShieldConfig, opts: &SetupOptions) -> SetupReport {
         }
     }
 
-    // 3. Install claude-shield CLI shortcut
     let shield_cli = "#!/usr/bin/env bash\n# Claude Shield Managed Wrapper\nset -euo pipefail\nexec \"$HOME/.local/bin/claude-shield-core\" \"$@\"\n";
     if let Err(e) = write_executable(&local_bin.join("claude-shield"), shield_cli) {
         warnings.push(e);
     }
 
-    // 4. Install OAuth AdsPower-Only Interceptor
     let oauth_script = r#"#!/usr/bin/env bash
 # Claude Shield Managed Wrapper
 set -euo pipefail
@@ -442,7 +236,6 @@ exec /usr/bin/open "$@"
         actions.push("已部署 OAuth 系统浏览器弹窗拦截器（强制剪贴板转发）".to_string());
     }
 
-    // 5. Install claude-guard.sh (compatibility helper)
     let guard_sh = format!(
         r#"#!/usr/bin/env bash
 # Claude Shield Managed Wrapper
@@ -478,19 +271,18 @@ export_claude_env() {{
   export DO_NOT_TRACK="1"
 }}
 "#,
-        ip = opts.expected_ip.trim(),
+        ip = clean_ip,
         port = opts.proxy_port,
-        tz = opts.target_tz.trim()
+        tz = clean_tz
     );
     let _ = write_executable(&local_bin.join("claude-guard.sh"), &guard_sh);
 
-    // 6. Install Claude Code CLI hard-bound wrapper
     let real_claude = find_real_claude_cli(home).unwrap_or_else(|| "/usr/local/bin/claude".to_string());
     let cli_wrapper = format!(
         r#"#!/usr/bin/env bash
 # Claude Shield Managed Wrapper
 set -euo pipefail
-REAL_CLAUDE="{real}"
+REAL_CLAUDE='{real}'
 if [[ ! -x "${{REAL_CLAUDE}}" ]]; then
   REAL_CLAUDE="$(which -a claude 2>/dev/null | grep -v "$HOME/.local/bin/claude" | head -n 1 || true)"
 fi
@@ -500,17 +292,15 @@ if [[ -z "${{REAL_CLAUDE}}" || ! -x "${{REAL_CLAUDE}}" ]]; then
 fi
 exec "$HOME/.local/bin/claude-shield-core" exec-cli "${{REAL_CLAUDE}}" "$@"
 "#,
-        real = real_claude
+        real = real_claude.replace('\'', "'\\''")
     );
     if write_executable(&local_bin.join("claude"), &cli_wrapper).is_ok() {
         actions.push("已部署 Claude Code CLI 代理门禁与 IPv4-Only/时区/语言硬绑定".to_string());
     }
 
-    // 7. Install claude-desktop-safe shortcut
     let desktop_safe = "#!/usr/bin/env bash\n# Claude Shield Managed Wrapper\nset -euo pipefail\nexec \"$HOME/.local/bin/claude-shield-core\" launch-desktop \"$@\"\n";
     let _ = write_executable(&local_bin.join("claude-desktop-safe"), desktop_safe);
 
-    // 8. Ensure ~/.local/bin in shell PATH (~/.zshrc and ~/.bash_profile if present)
     if let Some(msg) = ensure_shell_path_block(&home.join(".zshrc")) {
         actions.push(msg);
     }
@@ -521,7 +311,6 @@ exec "$HOME/.local/bin/claude-shield-core" exec-cli "${{REAL_CLAUDE}}" "$@"
         }
     }
 
-    // 9. Harden ~/.claude/settings.json (non-destructive merge + first-time backup)
     let settings_path = claude_dir.join("settings.json");
     let backup_meta_path = backup_dir.join("meta.json");
     let mut settings_val: serde_json::Value = fs::read_to_string(&settings_path)
@@ -556,7 +345,7 @@ exec "$HOME/.local/bin/claude-shield-core" exec-cli "${{REAL_CLAUDE}}" "$@"
 
         let env = obj.entry("env").or_insert_with(|| serde_json::json!({}));
         if let Some(env_obj) = env.as_object_mut() {
-            env_obj.insert("TZ".to_string(), serde_json::json!(opts.target_tz.trim()));
+            env_obj.insert("TZ".to_string(), serde_json::json!(clean_tz));
             env_obj.insert("LANG".to_string(), serde_json::json!("en_US.UTF-8"));
             env_obj.insert("LC_ALL".to_string(), serde_json::json!("en_US.UTF-8"));
             env_obj.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(), serde_json::json!("1"));
@@ -571,13 +360,12 @@ exec "$HOME/.local/bin/claude-shield-core" exec-cli "${{REAL_CLAUDE}}" "$@"
         if fs::write(&settings_path, format!("{}\n", pretty)).is_ok() {
             actions.push(format!(
                 "已加固 ~/.claude/settings.json（Seatbelt 沙盒 + TZ={} + en_US.UTF-8 + 全量去遥测）",
-                opts.target_tz.trim()
+                clean_tz
             ));
         }
     }
 
-    // 10. Hide original Claude.app if requested
-    let updated_cfg = ShieldConfig::load();
+    let updated_cfg = ShieldConfig::from_home(cfg.home_dir.clone());
     if opts.hide_original {
         let hide_actions = hide_original_claude_app(&updated_cfg);
         if hide_actions.is_empty() {
@@ -589,7 +377,6 @@ exec "$HOME/.local/bin/claude-shield-core" exec-cli "${{REAL_CLAUDE}}" "$@"
         }
     }
 
-    // 11. Login Auto-Start Radar LaunchAgent
     let radar_plist = agents_dir.join("com.local.claude.shield.radar.plist");
     if opts.enable_autostart {
         let app_exec = format!(
@@ -613,7 +400,7 @@ exec "$HOME/.local/bin/claude-shield-core" exec-cli "${{REAL_CLAUDE}}" "$@"
 </dict>
 </plist>
 "#,
-            exec = app_exec
+            exec = xml_escape(&app_exec)
         );
         if install_launch_agent(&radar_plist, &plist_xml) {
             actions.push("已开启开机自启状态栏雷达 (LaunchAgent)".to_string());
@@ -622,9 +409,10 @@ exec "$HOME/.local/bin/claude-shield-core" exec-cli "${{REAL_CLAUDE}}" "$@"
         remove_launch_agent(&radar_plist);
     }
 
-    // 12. Daily Deep Purity Patrol LaunchAgent
     let patrol_plist = agents_dir.join("com.local.claude.shield.patrol.plist");
     if opts.enable_daily_patrol {
+        let log_path = config_dir.join("patrol.log").display().to_string();
+        let core_path = core_dst.display().to_string();
         let patrol_xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -648,8 +436,8 @@ exec "$HOME/.local/bin/claude-shield-core" exec-cli "${{REAL_CLAUDE}}" "$@"
 </dict>
 </plist>
 "#,
-            core = core_dst.display(),
-            log = config_dir.join("patrol.log").display()
+            core = xml_escape(&core_path),
+            log = xml_escape(&log_path)
         );
         if install_launch_agent(&patrol_plist, &patrol_xml) {
             actions.push("已开启每日 09:30 自动 IP 纯净度巡检".to_string());
@@ -662,195 +450,119 @@ exec "$HOME/.local/bin/claude-shield-core" exec-cli "${{REAL_CLAUDE}}" "$@"
         ok: true,
         actions,
         warnings,
-        expected_ip: opts.expected_ip.trim().to_string(),
+        expected_ip: clean_ip,
         proxy_port: opts.proxy_port,
-        target_tz: opts.target_tz.trim().to_string(),
+        target_tz: clean_tz,
     }
 }
 
-pub fn run_uninstall(cfg: &ShieldConfig, remove_app: bool) -> UninstallReport {
-    let mut restored = Vec::new();
-    let mut warnings = Vec::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::uninstall::{remove_shell_path_block, run_uninstall};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let home = &cfg.home_dir;
-    let config_dir = &cfg.config_dir;
-    let agents_dir = home.join("Library/LaunchAgents");
-
-    // 1. Remove LaunchAgents (Auto-Start Radar & Daily Patrol)
-    let r1 = remove_launch_agent(&agents_dir.join("com.local.claude.shield.radar.plist"));
-    let r2 = remove_launch_agent(&agents_dir.join("com.local.claude.shield.patrol.plist"));
-    if r1 || r2 {
-        restored.push("已关闭并移除开机自启雷达与每日定时巡检任务".to_string());
+    fn temp_home(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "claude-shield-setup-{}-{}-{}",
+            tag,
+            std::process::id(),
+            nanos
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp home");
+        dir
     }
 
-    // 2. Restore original Claude.app from hidden vault -> /Applications/Claude.app
-    let vault_dir = home.join(".local/apps");
-    let vault_app = vault_dir.join("Claude.app");
-    let apps_dst = PathBuf::from("/Applications/Claude.app");
-    let lsreg = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
-
-    let _ = Command::new("/usr/bin/chflags")
-        .args(["nohidden", vault_dir.to_str().unwrap_or("")])
-        .status();
-
-    if vault_app.exists() {
-        let _ = Command::new("/usr/bin/chflags")
-            .args(["nohidden", vault_app.to_str().unwrap_or("")])
-            .status();
-
-        if !apps_dst.exists() {
-            let moved = Command::new("/bin/mv")
-                .args([vault_app.to_str().unwrap_or(""), "/Applications/Claude.app"])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if moved {
-                let _ = Command::new("/usr/bin/chflags")
-                    .args(["nohidden", "/Applications/Claude.app"])
-                    .status();
-                if Path::new(lsreg).exists() {
-                    let _ = Command::new(lsreg)
-                        .args(["-f", "/Applications/Claude.app"])
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
-                }
-                restored.push("已将原版 Claude.app 完整还原至 /Applications 并恢复启动台/Spotlight 图标".to_string());
-            } else {
-                warnings.push("未能将 ~/.local/apps/Claude.app 移回 /Applications（请检查目录权限）".to_string());
-            }
-        } else {
-            let _ = fs::remove_dir_all(&vault_app);
-            if Path::new(lsreg).exists() {
-                let _ = Command::new(lsreg)
-                    .args(["-f", "/Applications/Claude.app"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-            restored.push("原版 Claude.app 已位于 /Applications，已清理隔离仓并刷新系统图标索引".to_string());
-        }
-    }
-    let _ = fs::remove_file(vault_dir.join(".metadata_never_index"));
-    let _ = fs::remove_dir(&vault_dir); // only removes if empty
-
-    // 3. Surgically restore ~/.claude/settings.json (remove only Claude Shield keys, preserve user's other settings)
-    let settings_path = home.join(".claude/settings.json");
-    let backup_meta: BackupMeta = fs::read_to_string(config_dir.join("backup/meta.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-
-    if settings_path.exists() {
-        if let Ok(raw) = fs::read_to_string(&settings_path) {
-            if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                let mut touched = false;
-                if let Some(obj) = val.as_object_mut() {
-                    if let Some(env_obj) = obj.get_mut("env").and_then(|e| e.as_object_mut()) {
-                        for k in [
-                            "TZ",
-                            "LANG",
-                            "LC_ALL",
-                            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-                            "CLAUDE_CODE_ENABLE_TELEMETRY",
-                            "DISABLE_TELEMETRY",
-                            "DISABLE_ERROR_REPORTING",
-                            "DISABLE_BUG_COMMAND",
-                            "DISABLE_AUTOUPDATER",
-                        ] {
-                            if env_obj.remove(k).is_some() {
-                                touched = true;
-                            }
-                        }
-                        if env_obj.is_empty() {
-                            obj.remove("env");
-                        }
-                    }
-
-                    if !backup_meta.had_sandbox_enabled {
-                        if let Some(sb_obj) = obj.get_mut("sandbox").and_then(|s| s.as_object_mut()) {
-                            if sb_obj.remove("enabled").is_some() {
-                                touched = true;
-                            }
-                            if !backup_meta.had_auto_allow_bash {
-                                sb_obj.remove("autoAllowBashIfSandboxed");
-                            }
-                            if sb_obj.is_empty() {
-                                obj.remove("sandbox");
-                            }
-                        }
-                    }
-                }
-                if touched {
-                    if let Ok(pretty) = serde_json::to_string_pretty(&val) {
-                        let _ = fs::write(&settings_path, format!("{}\n", pretty));
-                    }
-                    restored.push("已还原 ~/.claude/settings.json（清除时区/语言/去遥测/沙盒注入，保留您原有配置）".to_string());
-                }
-            }
-        }
+    #[test]
+    fn validates_ip_tz_and_xml_escape() {
+        assert_eq!(validate_ip_input(" 45.77.12.34 ").as_deref(), Ok("45.77.12.34"));
+        assert!(validate_ip_input("45.77.12.34\"; rm -rf /").is_err());
+        assert_eq!(validate_tz_input(" America/Los_Angeles ").as_deref(), Ok("America/Los_Angeles"));
+        assert!(validate_tz_input("../etc/passwd").is_err());
+        assert!(validate_tz_input("Asia/Shanghai$(id)").is_err());
+        assert_eq!(xml_escape("/Applications/A & B's.app"), "/Applications/A &amp; B&apos;s.app");
     }
 
-    // 4. Remove CLI wrappers & OAuth interceptor
-    let local_bin = home.join(".local/bin");
-    let mut removed_cli = false;
-
-    let claude_wrapper = local_bin.join("claude");
-    if claude_wrapper.exists() {
-        if let Ok(text) = fs::read_to_string(&claude_wrapper) {
-            if (text.contains("claude-shield") || text.contains("claude-guard"))
-                && fs::remove_file(&claude_wrapper).is_ok()
-            {
-                removed_cli = true;
-            }
-        }
-    }
-    for name in ["claude-shield", "claude-shield-core", "claude-guard.sh", "claude-desktop-safe"] {
-        let p = local_bin.join(name);
-        if p.exists() && fs::remove_file(&p).is_ok() {
-            removed_cli = true;
-        }
-    }
-    let guard_bin = home.join(".local/lib/claude-guard-bin");
-    if guard_bin.exists() && fs::remove_dir_all(&guard_bin).is_ok() {
-        removed_cli = true;
-    }
-    if removed_cli {
-        restored.push("已移除 Claude Code CLI 代理门禁与 OAuth 弹窗拦截器".to_string());
+    #[test]
+    fn setup_rejects_invalid_ip_without_touching_disk() {
+        let home = temp_home("invalid");
+        let cfg = ShieldConfig::from_home(home.clone());
+        let opts = SetupOptions {
+            expected_ip: "not-an-ip".to_string(),
+            proxy_port: 7897,
+            target_tz: "America/Los_Angeles".to_string(),
+            hide_original: false,
+            enable_autostart: false,
+            enable_daily_patrol: false,
+            app_bundle_path: "/Applications/Claude Shield.app".to_string(),
+        };
+        let report = run_setup(&cfg, &opts);
+        assert!(!report.ok);
+        assert!(!cfg.config_dir.join("expected_ip").exists());
+        let _ = fs::remove_dir_all(&home);
     }
 
-    // 5. Remove Shell PATH block
-    let mut cleaned_rc = false;
-    if remove_shell_path_block(&home.join(".zshrc")) {
-        cleaned_rc = true;
-    }
-    if remove_shell_path_block(&home.join(".bash_profile")) {
-        cleaned_rc = true;
-    }
-    if cleaned_rc {
-        restored.push("已清理 Shell 配置 (~/.zshrc) 中的路径注入块".to_string());
-    }
+    #[test]
+    fn setup_and_uninstall_roundtrip_preserves_user_settings() {
+        let home = temp_home("roundtrip");
+        let claude_dir = home.join(".claude");
+        fs::create_dir_all(&claude_dir).expect("mkdir .claude");
+        fs::write(
+            claude_dir.join("settings.json"),
+            "{\n  \"theme\": \"dark\",\n  \"env\": { \"CUSTOM_VAR\": \"keep\" }\n}\n",
+        )
+        .expect("write settings");
+        fs::write(home.join(".zshrc"), "export FOO=bar\n").expect("write zshrc");
 
-    // 6. Remove ~/.config/claude-guard
-    if config_dir.exists() && fs::remove_dir_all(config_dir).is_ok() {
-        restored.push("已清理 ~/.config/claude-guard 本地配置与缓存".to_string());
-    }
+        let cfg = ShieldConfig::from_home(home.clone());
+        let opts = SetupOptions {
+            expected_ip: "45.77.12.34".to_string(),
+            proxy_port: 7897,
+            target_tz: "America/Los_Angeles".to_string(),
+            hide_original: false,
+            enable_autostart: false,
+            enable_daily_patrol: false,
+            app_bundle_path: "/Applications/Claude Shield.app".to_string(),
+        };
+        let report = run_setup(&cfg, &opts);
+        assert!(report.ok);
+        assert_eq!(
+            fs::read_to_string(cfg.config_dir.join("hide_original")).expect("read hide"),
+            "0\n"
+        );
+        assert!(home.join(".local/bin/claude").exists());
+        assert!(home.join(".local/lib/claude-guard-bin/open").exists());
+        assert!(fs::read_to_string(home.join(".zshrc"))
+            .expect("read zshrc")
+            .contains("# >>> Claude Shield >>>"));
 
-    // 7. Optionally remove /Applications/Claude Shield.app (CLI uninstall mode)
-    if remove_app {
-        let shield_app = Path::new("/Applications/Claude Shield.app");
-        if shield_app.exists() && fs::remove_dir_all(shield_app).is_ok() {
-            restored.push("已移除 /Applications/Claude Shield.app".to_string());
-        }
-    }
+        let u_report = run_uninstall(&cfg, false);
+        assert!(u_report.ok);
+        assert!(!cfg.config_dir.exists());
+        assert!(!home.join(".local/bin/claude").exists());
+        let zshrc = fs::read_to_string(home.join(".zshrc")).expect("read zshrc");
+        assert!(!zshrc.contains("Claude Shield"));
+        assert!(zshrc.contains("export FOO=bar"));
 
-    if restored.is_empty() {
-        restored.push("本机未发现残留的 Claude Shield 防护配置，系统已处于原始状态".to_string());
-    }
+        let settings: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(claude_dir.join("settings.json")).expect("read settings"),
+        )
+        .expect("parse settings");
+        assert_eq!(settings.get("theme").and_then(|v| v.as_str()), Some("dark"));
+        assert_eq!(
+            settings.pointer("/env/CUSTOM_VAR").and_then(|v| v.as_str()),
+            Some("keep")
+        );
+        assert!(settings.pointer("/env/TZ").is_none());
+        assert!(settings.get("sandbox").is_none());
 
-    UninstallReport {
-        ok: warnings.is_empty(),
-        restored,
-        warnings,
+        assert!(!remove_shell_path_block(&home.join(".zshrc")));
+        let _ = fs::remove_dir_all(&home);
     }
 }

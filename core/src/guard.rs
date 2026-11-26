@@ -10,6 +10,7 @@ pub struct LocalDefenseAudit {
     pub oauth_locked: bool,
     pub original_hidden: bool,
     pub original_app_exposed: bool,
+    pub hide_original_enabled: bool,
     pub sandbox_enabled: bool,
     pub telemetry_disabled: bool,
     pub desktop_pid: Option<String>,
@@ -35,6 +36,53 @@ fn run_capture(bin: &str, args: &[&str]) -> String {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+pub(crate) fn escape_applescript(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "'")
+        .replace(['\r', '\n'], " ")
+}
+
+pub(crate) fn parse_pid_comm_line(line: &str, self_pid: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let split_at = trimmed.find(char::is_whitespace)?;
+    let pid = trimmed[..split_at].trim();
+    if pid.is_empty() || pid == self_pid || !pid.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let comm = trimmed[split_at..].trim();
+    if comm.is_empty() {
+        return None;
+    }
+    Some((pid.to_string(), comm.to_string()))
+}
+
+pub(crate) fn is_candidate_cli_comm(comm: &str) -> bool {
+    let base = comm.rsplit('/').next().unwrap_or(comm);
+    matches!(base, "claude" | "node" | "bun")
+}
+
+pub(crate) fn is_genuine_claude_cli_args(comm: &str, args_str: &str) -> bool {
+    let base = comm.rsplit('/').next().unwrap_or(comm);
+    let is_claude_bin = base == "claude";
+    let is_node_claude = (base == "node" || base == "bun")
+        && (args_str.contains("@anthropic-ai/claude-code") || args_str.contains("/claude-code/"));
+    (is_claude_bin || is_node_claude)
+        && !args_str.contains("claude-shield")
+        && !args_str.contains("ClaudeShield")
+        && !args_str.contains("Claude.app")
+        && !args_str.contains("claude-guard")
+        && !args_str.contains("claude-desktop-safe")
+}
+
+pub(crate) fn has_expected_proxy_env(env_out: &str, proxy_port: u16) -> bool {
+    let upper = format!("HTTP_PROXY=http://127.0.0.1:{}", proxy_port);
+    let lower = format!("http_proxy=http://127.0.0.1:{}", proxy_port);
+    env_out.contains(&upper) || env_out.contains(&lower)
 }
 
 pub fn audit_local_defenses(cfg: &ShieldConfig) -> LocalDefenseAudit {
@@ -64,7 +112,6 @@ pub fn audit_local_defenses(cfg: &ShieldConfig) -> LocalDefenseAudit {
                 && settings_text.contains("DISABLE_TELEMETRY")
         });
 
-    // Process-level audit for Claude Desktop
     let pgrep_out = run_capture("/usr/bin/pgrep", &["-x", "Claude"]);
     let desktop_pid = pgrep_out
         .lines()
@@ -81,10 +128,10 @@ pub fn audit_local_defenses(cfg: &ShieldConfig) -> LocalDefenseAudit {
         let expected_flag = format!("--proxy-server=http://127.0.0.1:{}", cfg.proxy_port);
         desktop_proxy_bound = args_out.contains(&expected_flag);
         desktop_quic_disabled = args_out.contains("--disable-quic");
-        desktop_webrtc_locked = args_out.contains("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
+        desktop_webrtc_locked =
+            args_out.contains("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
     }
 
-    // Audit running Claude Code CLI processes (check env via `ps eww` for HTTP_PROXY binding)
     let unprotected_cli_pids = find_unprotected_claude_cli_pids(cfg);
 
     let cli_ready = is_executable(&cfg.home_dir.join(".local/bin/claude"));
@@ -101,6 +148,7 @@ pub fn audit_local_defenses(cfg: &ShieldConfig) -> LocalDefenseAudit {
         oauth_locked,
         original_hidden,
         original_app_exposed: orig_in_apps,
+        hide_original_enabled: cfg.hide_original,
         sandbox_enabled,
         telemetry_disabled,
         desktop_pid,
@@ -115,39 +163,25 @@ pub fn audit_local_defenses(cfg: &ShieldConfig) -> LocalDefenseAudit {
 }
 
 fn find_unprotected_claude_cli_pids(cfg: &ShieldConfig) -> Vec<String> {
-    let out = run_capture("/bin/ps", &["ax", "-o", "pid=,comm=,args="]);
-    let expected_proxy = format!("HTTP_PROXY=http://127.0.0.1:{}", cfg.proxy_port);
+    // Query only pid + comm first so spaces inside `comm` paths never misalign `args=` splitting.
+    let out = run_capture("/bin/ps", &["-ax", "-o", "pid=,comm="]);
     let mut bad = Vec::new();
     let self_pid = std::process::id().to_string();
 
     for line in out.lines() {
-        let trimmed = line.trim();
-        let mut parts = trimmed.splitn(3, char::is_whitespace);
-        let pid = match parts.next() {
-            Some(p) if !p.is_empty() && p != self_pid => p.trim(),
-            _ => continue,
+        let Some((pid, comm)) = parse_pid_comm_line(line, &self_pid) else {
+            continue;
         };
-        let rest = trimmed[pid.len()..].trim();
-        let mut rest_parts = rest.splitn(2, char::is_whitespace);
-        let comm = rest_parts.next().unwrap_or("");
-        let args_str = rest_parts.next().unwrap_or("").trim();
-        let comm_base = comm.rsplit('/').next().unwrap_or(comm);
-        // Match genuine Claude Code CLI process (binary named `claude` or node running `@anthropic-ai/claude-code`)
-        let is_claude_bin = comm_base == "claude";
-        let is_node_claude = (comm_base == "node" || comm_base == "bun")
-            && (args_str.contains("@anthropic-ai/claude-code") || args_str.contains("/claude-code/"));
-        let is_claude_cli = (is_claude_bin || is_node_claude)
-            && !rest.contains("claude-shield")
-            && !rest.contains("ClaudeShield")
-            && !rest.contains("Claude.app")
-            && !rest.contains("claude-guard")
-            && !rest.contains("claude-desktop-safe");
-        if !is_claude_cli {
+        if !is_candidate_cli_comm(&comm) {
             continue;
         }
-        let env_out = run_capture("/bin/ps", &["eww", "-p", pid, "-o", "command="]);
-        if !env_out.is_empty() && !env_out.contains(&expected_proxy) {
-            bad.push(pid.to_string());
+        let args_str = run_capture("/bin/ps", &["-p", &pid, "-o", "args="]);
+        if !is_genuine_claude_cli_args(&comm, &args_str) {
+            continue;
+        }
+        let env_out = run_capture("/bin/ps", &["eww", "-p", &pid, "-o", "command="]);
+        if !env_out.is_empty() && !has_expected_proxy_env(&env_out, cfg.proxy_port) {
+            bad.push(pid);
         }
     }
     bad
@@ -168,7 +202,6 @@ pub fn hide_original_claude_app(cfg: &ShieldConfig) -> Vec<String> {
     let was_exposed = apps_src.exists();
     if was_exposed {
         if vault_app.exists() {
-            // Claude Desktop auto-updater dropped a newer /Applications/Claude.app -> replace vault copy atomically
             let backup = vault_dir.join("Claude.app.old");
             let _ = fs::remove_dir_all(&backup);
             let _ = fs::rename(&vault_app, &backup);
@@ -193,10 +226,7 @@ pub fn hide_original_claude_app(cfg: &ShieldConfig) -> Vec<String> {
         }
     }
 
-    // Prevent Spotlight indexing
     let _ = fs::write(vault_dir.join(".metadata_never_index"), "");
-
-    // Set macOS Finder/Launchpad hidden flag
     let _ = Command::new("/usr/bin/chflags")
         .args(["hidden", vault_dir.to_str().unwrap_or("")])
         .status();
@@ -206,7 +236,6 @@ pub fn hide_original_claude_app(cfg: &ShieldConfig) -> Vec<String> {
             .status();
     }
 
-    // Unregister original Claude.app from LaunchServices so Spotlight & Launchpad only show Claude Shield.app
     let lsreg = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
     if Path::new(lsreg).exists() {
         if was_exposed || apps_src.exists() {
@@ -228,7 +257,6 @@ pub fn hide_original_claude_app(cfg: &ShieldConfig) -> Vec<String> {
         }
     }
 
-    // Clean stale Claude.app icon from Dock if pinned (surgical Python plist edit)
     let dock_clean_script = r#"
 import plistlib, os, subprocess, sys
 p = os.path.expanduser("~/Library/Preferences/com.apple.dock.plist")
@@ -269,12 +297,14 @@ pub fn kill_pids(pids: &[String]) {
 }
 
 pub fn send_macos_notification(title: &str, body: &str, sound: Option<&str>) {
-    let safe_title = title.replace('\\', "\\\\").replace('"', "'");
-    let safe_body = body.replace('\\', "\\\\").replace('"', "'").replace('\n', " ");
+    let safe_title = escape_applescript(title);
+    let safe_body = escape_applescript(body);
     let script = match sound {
         Some(s) => format!(
             "display notification \"{}\" with title \"{}\" sound name \"{}\"",
-            safe_body, safe_title, s
+            safe_body,
+            safe_title,
+            escape_applescript(s)
         ),
         None => format!(
             "display notification \"{}\" with title \"{}\"",
@@ -282,4 +312,39 @@ pub fn send_macos_notification(title: &str, body: &str, sound: Option<&str>) {
         ),
     };
     let _ = Command::new("/usr/bin/osascript").args(["-e", &script]).status();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_pid_comm_handles_spaces_in_path() {
+        assert_eq!(
+            parse_pid_comm_line("  1234 /Applications/My App/claude  ", "999"),
+            Some(("1234".to_string(), "/Applications/My App/claude".to_string()))
+        );
+        assert_eq!(parse_pid_comm_line("999 /usr/local/bin/claude", "999"), None);
+        assert_eq!(parse_pid_comm_line("badpid /usr/local/bin/claude", "999"), None);
+    }
+
+    #[test]
+    fn cli_matching_excludes_wrappers_and_accepts_proxy_env() {
+        assert!(is_candidate_cli_comm("/opt/homebrew/bin/claude"));
+        assert!(is_candidate_cli_comm("/usr/local/bin/node"));
+        assert!(!is_candidate_cli_comm("/usr/bin/python3"));
+
+        assert!(is_genuine_claude_cli_args("claude", "claude --resume"));
+        assert!(is_genuine_claude_cli_args("node", "node /opt/node_modules/@anthropic-ai/claude-code/cli.js"));
+        assert!(!is_genuine_claude_cli_args("claude", "claude-shield-core exec-cli"));
+
+        assert!(has_expected_proxy_env("PATH=/usr/bin HTTP_PROXY=http://127.0.0.1:7897", 7897));
+        assert!(has_expected_proxy_env("http_proxy=http://127.0.0.1:7890", 7890));
+        assert!(!has_expected_proxy_env("HTTP_PROXY=http://127.0.0.1:7890", 7897));
+    }
+
+    #[test]
+    fn escape_applescript_sanitizes_quotes_and_newlines() {
+        assert_eq!(escape_applescript("a\"b\\c\nd\re"), "a'b\\\\c d e");
+    }
 }

@@ -19,6 +19,33 @@
   <img src="https://img.shields.io/badge/License-MIT-3B82F6?style=for-the-badge" alt="MIT License" />
 </p>
 
+<p align="center">
+  <img src="./assets/showcase-hero.png" width="100%" alt="Claude Shield v3.3 — macOS 原生 Studio 控制台与菜单栏雷达" />
+</p>
+
+---
+
+## 界面预览
+
+<table>
+  <tr>
+    <td width="64%" align="center">
+      <img src="./assets/screenshot-console-radar.png" alt="Studio 控制台 — 实时雷达（浅色主题）" /><br/>
+      <sub><b>Studio 控制台 · 实时雷达</b>（双通道出口门禁 + 8 项本地防线矩阵）</sub>
+    </td>
+    <td width="36%" align="center">
+      <img src="./assets/screenshot-menubar-radar.png" alt="菜单栏即时雷达 Popover" /><br/>
+      <sub><b>菜单栏雷达</b>（&lt;5ms 缓存瞬开 · 一键安全启动 / 测速）</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <img src="./assets/screenshot-console-purity.png" width="84%" alt="Studio 控制台 — 多源 IP 纯净度深度体检（深色主题）" /><br/>
+      <sub><b>深色主题 · 多源 IP 纯净度体检</b>（Cloudflare Edge + IPPure + ProxyCheck + 双通道 EDNS DNS / IPv6 零泄露审计）</sub>
+    </td>
+  </tr>
+</table>
+
 ---
 
 ## 为什么需要 Claude Shield？
@@ -33,7 +60,7 @@
 
 用虚拟机套娃（Lima / Docker）虽然能隔离，却动辄常驻 **2–4GB 内存**、拖慢本地文件 I/O、配置门槛极高。
 
-**Claude Shield v3.2** 用 **原生 Rust 核心引擎 + 原生 SwiftUI 菜单栏雷达 & Studio 控制台** 彻底解决这些问题：**下载 App、拖进应用程序、点一下「一键部署」**，无需命令行、无需安装 Rust/Xcode，常驻内存 **< 20MB**；不需要时 **一键卸载并 100% 还原原版应用与所有系统配置**。
+**Claude Shield v3.3** 用 **原生 Rust 核心引擎 + 原生 SwiftUI 菜单栏雷达 & Studio 控制台** 彻底解决这些问题：**下载 App、拖进应用程序、点一下「一键部署」**，无需命令行、无需安装 Rust/Xcode，常驻内存 **< 20MB**；不需要时 **一键卸载并 100% 还原原版应用与所有系统配置**。
 
 ---
 
@@ -42,7 +69,7 @@
 ### 1. 下载安装
 
 前往 **[GitHub Releases 最新版本](https://github.com/luvio-arlan/claude-shield/releases/latest)** 下载：
-- **`Claude-Shield-v3.2.0-macOS-arm64.dmg`**（推荐，双击打开后拖入 `Applications` 文件夹即可）
+- **`Claude-Shield-v3.3.0-macOS-arm64.dmg`**（推荐，双击打开后拖入 `Applications` 文件夹即可）
 
 > **首次打开提示**：由于开源版本采用 Ad-hoc 本地签名（未购买 Apple 付费公证证书），首次打开若遇到 macOS 安全提示，请在终端执行一次即可永久放行：
 > ```bash
@@ -115,7 +142,7 @@ bash scripts/uninstall.sh
 2. **安全启动桌面版**：在状态栏或控制台点击「安全启动 Claude」，毫秒级验真并安全拉起 Claude 桌面版。
 3. **菜单栏实时雷达**：点击状态栏 `LA 185ms · S` 图标，快速查看节点状态、纯净度评分、一键测速、一键 2x Retina 诊断截图、进入控制台与卸载还原。
 4. **终端 Claude Code**：直接运行 `claude`，自动经由 Rust 核心极速验真并注入全套防封环境。
-4. **终端诊断工具 (`claude-shield`)**：
+5. **终端诊断工具 (`claude-shield`)**：
    ```bash
    claude-shield purity                 # 执行 ip.net.coffee 级多源 IP 纯净度深度体检
    claude-shield patrol                 # 执行全链路安全巡检与防线自愈
@@ -134,7 +161,7 @@ git clone https://github.com/luvio-arlan/claude-shield.git
 cd claude-shield
 
 # 打包独立的 macOS .app / .dmg / .zip（输出至 dist/）
-bash scripts/build-release.sh 3.2.0
+bash scripts/build-release.sh 3.3.0
 
 # 或直接通过命令行安装到本机
 bash scripts/install.sh \

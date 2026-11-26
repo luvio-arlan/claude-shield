@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Claude Shield v3.2 — Standalone macOS .app + .dmg + .zip Release Packager
+# Claude Shield — Standalone macOS .app + .dmg + .zip Release Packager
 set -euo pipefail
 
-VERSION="${1:-3.2.0}"
-ARCH="$(uname -m)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CARGO_VERSION="$(awk -F'"' '/^version = / { print $2; exit }' "${REPO_ROOT}/core/Cargo.toml")"
+VERSION="${1:-${CARGO_VERSION}}"
+ARCH="$(uname -m)"
 DIST_DIR="${REPO_ROOT}/dist"
 APP_NAME="Claude Shield.app"
 APP_DIR="${DIST_DIR}/${APP_NAME}"
@@ -16,7 +17,7 @@ ZIP_OUT="${DIST_DIR}/Claude-Shield-v${VERSION}-macOS-${ARCH}.zip"
 rm -rf "${DIST_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources" "${DMG_STAGING}"
 
-echo "🦀 [1/5] Building native Rust core engine (release, LTO + strip)..."
+echo "🦀 [1/5] Building native Rust core engine v${VERSION} (release, LTO + strip)..."
 (cd "${REPO_ROOT}/core" && cargo build --release --quiet)
 cp "${REPO_ROOT}/core/target/release/claude-shield-core" "${APP_DIR}/Contents/MacOS/claude-shield-core"
 chmod +x "${APP_DIR}/Contents/MacOS/claude-shield-core"
@@ -24,7 +25,7 @@ chmod +x "${APP_DIR}/Contents/MacOS/claude-shield-core"
 echo "🦅 [2/5] Compiling native SwiftUI App (macOS 13.0+ ${ARCH})..."
 swiftc -O -target "${ARCH}-apple-macos13.0" \
   -framework Cocoa -framework SwiftUI -framework Network -framework QuartzCore \
-  "${REPO_ROOT}/app/ClaudeShieldApp.swift" \
+  "${REPO_ROOT}/app/Sources/"*.swift \
   -o "${APP_DIR}/Contents/MacOS/ClaudeShield"
 chmod +x "${APP_DIR}/Contents/MacOS/ClaudeShield"
 

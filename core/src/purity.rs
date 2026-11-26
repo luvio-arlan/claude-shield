@@ -1,30 +1,10 @@
 use crate::config::ShieldConfig;
-use crate::probe::{build_direct_v4_client, build_direct_v6_client, build_proxy_client, probe_trace_channel};
+use crate::probe::{build_direct_v4_client, build_direct_v6_client, build_proxy_client, is_valid_ip_str, probe_trace_channel};
+use crate::purity_score::{evaluate_purity_score, is_dns_leaked, is_region_supported, timezones_match, PuritySignals};
 use chrono::Local;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-const BLOCKED_CLAUDE_REGIONS: &[&str] = &["CN", "HK", "MO", "RU", "BY", "KP", "IR", "SY", "CU"];
-
-const LEAKED_DNS_KEYWORDS: &[&str] = &[
-    "china",
-    "hong kong",
-    "macao",
-    "macau",
-    "chinanet",
-    "china telecom",
-    "china unicom",
-    "china mobile",
-    "alidns",
-    "alibaba",
-    "tencent",
-    "dnspod",
-    "baidu",
-    "114dns",
-    "cernet",
-    "cstnet",
-];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskFactor {
@@ -56,7 +36,7 @@ pub struct PurityReport {
     pub city: String,
     pub isp: String,
     pub asn: String,
-    pub ip_type: String, // "Residential" | "ISP" | "Business" | "Hosting" | "VPN/Proxy" | "Unknown"
+    pub ip_type: String,
     pub is_residential: bool,
     pub is_hosting: bool,
     pub is_proxy_or_vpn: bool,
@@ -78,14 +58,9 @@ pub struct PurityReport {
     pub ipv6_leak: bool,
     pub ipv6_exposed_ip: Option<String>,
     pub purity_score: u8,
-    pub grade: String,        // S, A, B, C, F
-    pub verdict: String,      // Human-readable Chinese summary
+    pub grade: String,   // S, A, B, C, F
+    pub verdict: String, // Human-readable Chinese summary
     pub factors: Vec<RiskFactor>,
-}
-
-fn is_dns_leaked(geo: &str) -> bool {
-    let lower = geo.to_lowercase();
-    LEAKED_DNS_KEYWORDS.iter().any(|k| lower.contains(k))
 }
 
 async fn fetch_json(client: &Client, url: &str) -> Option<Value> {
@@ -101,7 +76,6 @@ async fn fetch_json(client: &Client, url: &str) -> Option<Value> {
 }
 
 async fn probe_edns(client: &Client) -> DnsProbeInfo {
-    // edns.ip-api.com/json 302 redirects to a random subdomain that identifies the exact recursive DNS resolver
     if let Some(v) = fetch_json(client, "http://edns.ip-api.com/json").await {
         let ip = v.pointer("/dns/ip").and_then(|x| x.as_str()).map(String::from);
         let geo = v.pointer("/dns/geo").and_then(|x| x.as_str()).map(String::from);
@@ -124,7 +98,7 @@ async fn probe_ipv6_leak() -> (bool, Option<String>) {
         if resp.status().is_success() {
             if let Ok(text) = resp.text().await {
                 let ip = text.trim().to_string();
-                if ip.contains(':') && ip.len() <= 45 {
+                if ip.contains(':') && is_valid_ip_str(&ip) {
                     return (true, Some(ip));
                 }
             }
@@ -146,7 +120,6 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
         Err(_) => return fallback_error_report(cfg, checked_at),
     };
 
-    // Phase 1: Parallel core exit probes + IPPure + DNS leak (Proxy & TUN) + IPv6 leak
     let (claude_trace, tun_trace, ippure_val, dns_proxy, dns_tun, (ipv6_leak, ipv6_exposed_ip)) =
         tokio::join!(
             probe_trace_channel(&pc, "https://claude.ai/cdn-cgi/trace", false),
@@ -159,7 +132,13 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
 
     let exit_ip = if claude_trace.reachable {
         claude_trace.ip.clone()
-    } else if let Some(ip) = ippure_val.as_ref().and_then(|v| v.get("ip")).and_then(|x| x.as_str()) {
+    } else if let Some(ip) = ippure_val
+        .as_ref()
+        .and_then(|v| v.get("ip"))
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|ip| is_valid_ip_str(ip))
+    {
         ip.to_string()
     } else {
         "无法连通".to_string()
@@ -169,7 +148,6 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
         return fallback_error_report(cfg, checked_at);
     }
 
-    // Phase 2: Parallel multi-source IP intelligence enrichment for exact exit IP
     let proxycheck_url = format!("https://proxycheck.io/v2/{}?vpn=1&asn=1&risk=1", exit_ip);
     let ipapi_url = format!(
         "http://ip-api.com/json/{}?fields=status,country,countryCode,regionName,city,timezone,isp,org,as,asname,mobile,proxy,hosting,query",
@@ -183,7 +161,6 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
         fetch_json(&pc, &ipinfo_url)
     );
 
-    // Extract normalized intelligence across all 4 sources
     let pc_entry = proxycheck_val.as_ref().and_then(|v| v.get(&exit_ip));
     let info_data = ipinfo_val.as_ref().and_then(|v| v.get("data"));
 
@@ -259,7 +236,6 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
         .or_else(|| info_data.and_then(|v| v.get("timezone")).and_then(|x| x.as_str()))
         .map(String::from);
 
-    // Risk & Classification signals
     let ippure_fraud_score = ippure_val
         .as_ref()
         .and_then(|v| v.get("fraudScore"))
@@ -322,7 +298,10 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
         || pc_type.eq_ignore_ascii_case("Residential")
         || info_asn_type.eq_ignore_ascii_case("isp");
     let is_proxy_or_vpn = pc_proxy || ipapi_proxy || info_vpn || info_proxy;
-    let is_hosting = (ipapi_hosting || info_hosting || info_asn_type.eq_ignore_ascii_case("hosting") || pc_type.eq_ignore_ascii_case("Hosting"))
+    let is_hosting = (ipapi_hosting
+        || info_hosting
+        || info_asn_type.eq_ignore_ascii_case("hosting")
+        || pc_type.eq_ignore_ascii_case("Hosting"))
         && !is_residential;
 
     let ip_type = if is_tor {
@@ -352,7 +331,7 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
         (None, None) => None,
     };
 
-    let region_supported = !BLOCKED_CLAUDE_REGIONS.contains(&country_code.as_str()) && country_code != "??";
+    let region_supported = is_region_supported(&country_code);
     let dual_channel_match = tun_trace.reachable
         && tun_trace.ip == exit_ip
         && (!cfg.is_ip_configured() || exit_ip == cfg.expected_ip);
@@ -360,208 +339,40 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
         && claude_trace.ip == exit_ip
         && (!cfg.is_ip_configured() || claude_trace.ip == cfg.expected_ip);
     let dns_leak = dns_proxy.leaked || dns_tun.leaked;
-    let timezone_aligned = ip_timezone
-        .as_deref()
-        .map(|tz| tz == cfg.target_tz)
-        .unwrap_or(true);
+    let timezone_aligned = timezones_match(ip_timezone.as_deref(), &cfg.target_tz);
 
-    // Score calculation (transparent itemized risk model)
-    let mut score: i32 = 100;
-    let mut factors: Vec<RiskFactor> = Vec::new();
-
-    if !region_supported {
-        score -= 60;
-        factors.push(RiskFactor {
-            severity: "critical".to_string(),
-            title: "不支持地区红线".to_string(),
-            detail: format!("当前出口地区 {} 位于 Anthropic 封禁区，严禁访问", country_code),
-            penalty: -60,
-        });
-    } else {
-        factors.push(RiskFactor {
-            severity: "good".to_string(),
-            title: "Claude 合规地区".to_string(),
-            detail: format!("{} · {} ({})", country, city, country_code),
-            penalty: 0,
-        });
-    }
-
-    if !dual_channel_match || !claude_edge_match {
-        score -= 40;
-        factors.push(RiskFactor {
-            severity: "critical".to_string(),
-            title: "双通道 / Claude 边缘 IP 不一致".to_string(),
-            detail: format!(
-                "Claude 边缘: {} | TUN: {} | 白名单: {}",
-                claude_trace.ip, tun_trace.ip, cfg.expected_ip
-            ),
-            penalty: -40,
-        });
-    } else {
-        factors.push(RiskFactor {
-            severity: "good".to_string(),
-            title: "三点出口 100% 一致".to_string(),
-            detail: format!("Proxy = TUN = claude.ai ({})", exit_ip),
-            penalty: 0,
-        });
-    }
-
-    if dns_leak {
-        score -= 35;
-        factors.push(RiskFactor {
-            severity: "critical".to_string(),
-            title: "检测到 DNS 地区泄露".to_string(),
-            detail: format!(
-                "Proxy DNS: {} | TUN DNS: {}",
-                dns_proxy.geo.as_deref().unwrap_or("未知"),
-                dns_tun.geo.as_deref().unwrap_or("未知")
-            ),
-            penalty: -35,
-        });
-    } else {
-        factors.push(RiskFactor {
-            severity: "good".to_string(),
-            title: "零 DNS 泄露".to_string(),
-            detail: format!(
-                "解析出口: {}",
-                dns_tun
-                    .geo
-                    .as_deref()
-                    .or(dns_proxy.geo.as_deref())
-                    .unwrap_or("海外加密 DNS")
-            ),
-            penalty: 0,
-        });
-    }
-
-    if ipv6_leak {
-        score -= 25;
-        factors.push(RiskFactor {
-            severity: "critical".to_string(),
-            title: "检测到原生 IPv6 绕过泄露".to_string(),
-            detail: format!(
-                "直连暴露 IPv6: {}，建议关闭系统或 Clash IPv6",
-                ipv6_exposed_ip.as_deref().unwrap_or("unknown")
-            ),
-            penalty: -25,
-        });
-    } else {
-        factors.push(RiskFactor {
-            severity: "good".to_string(),
-            title: "零 IPv6 泄露".to_string(),
-            detail: "直连 IPv6 通道已完全封闭".to_string(),
-            penalty: 0,
-        });
-    }
-
-    if is_tor {
-        score -= 50;
-        factors.push(RiskFactor {
-            severity: "critical".to_string(),
-            title: "Tor 匿名出口".to_string(),
-            detail: "Tor 节点将被 Claude 直接拦截或秒封".to_string(),
-            penalty: -50,
-        });
-    } else if is_proxy_or_vpn {
-        score -= 25;
-        factors.push(RiskFactor {
-            severity: "warn".to_string(),
-            title: "命中公共代理 / VPN 库".to_string(),
-            detail: format!("{} ({}) 被风控库标记为代理/VPN", asn, isp),
-            penalty: -25,
-        });
-    } else if is_hosting {
-        score -= 20;
-        factors.push(RiskFactor {
-            severity: "warn".to_string(),
-            title: "数据中心 / 机房 IP".to_string(),
-            detail: format!("{} ({}) 属于云机房 ASN，建议升级原生 ISP/住宅 IP", asn, isp),
-            penalty: -20,
-        });
-    } else {
-        factors.push(RiskFactor {
-            severity: "good".to_string(),
-            title: format!("{} · {}", ip_type, asn),
-            detail: format!("运营商: {}（非机房/非公开代理）", isp),
-            penalty: 0,
-        });
-    }
-
-    if is_broadcast {
-        score -= 8;
-        factors.push(RiskFactor {
-            severity: "warn".to_string(),
-            title: "广播 IP 特征".to_string(),
-            detail: "IP 属于跨区广播段，纯净度略低于本地原生 IP".to_string(),
-            penalty: -8,
-        });
-    }
-
-    if let Some(fraud) = combined_fraud_score {
-        let pen = ((fraud as f64) * 0.35).round().min(30.0) as i32;
-        if pen > 0 {
-            score -= pen;
-        }
-        let sev = if fraud <= 25 {
-            "good"
-        } else if fraud <= 55 {
-            "warn"
-        } else {
-            "critical"
-        };
-        factors.push(RiskFactor {
-            severity: sev.to_string(),
-            title: format!("多源欺诈风险分: {}/100", fraud),
-            detail: format!(
-                "IPPure: {} | ProxyCheck: {}",
-                ippure_fraud_score.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
-                proxycheck_risk.map(|v| v.to_string()).unwrap_or_else(|| "-".into())
-            ),
-            penalty: -pen,
-        });
-    }
-
-    if !timezone_aligned {
-        score -= 10;
-        factors.push(RiskFactor {
-            severity: "warn".to_string(),
-            title: "时区与出口 IP 不一致".to_string(),
-            detail: format!(
-                "配置时区 {} ≠ 出口 IP 时区 {}",
-                cfg.target_tz,
-                ip_timezone.as_deref().unwrap_or("未知")
-            ),
-            penalty: -10,
-        });
-    } else {
-        factors.push(RiskFactor {
-            severity: "good".to_string(),
-            title: "时区严格对齐".to_string(),
-            detail: format!("注入时区 {} 与出口 IP 100% 匹配", cfg.target_tz),
-            penalty: 0,
-        });
-    }
-
-    if let Some(ref w) = claude_trace.warp {
-        if w != "off" && !w.is_empty() {
-            score -= 10;
-            factors.push(RiskFactor {
-                severity: "warn".to_string(),
-                title: "Cloudflare WARP 出口".to_string(),
-                detail: format!("检测到 warp={}，共享出口易触发人机验证", w),
-                penalty: -10,
-            });
-        }
-    }
-
-    let final_score = score.clamp(0, 100) as u8;
-    let (grade, verdict) = match final_score {
-        90..=100 => ("S", "极净原生 · 99% 安全环境"),
-        78..=89 => ("A", "优质合规 · 低风控风险"),
-        60..=77 => ("B", "中等风险 · 建议排查告警项"),
-        40..=59 => ("C", "高危环境 · 建议立即更换节点"),
-        _ => ("F", "封号红线 · 严禁启动 Claude"),
+    let signals = PuritySignals {
+        exit_ip: &exit_ip,
+        expected_ip: &cfg.expected_ip,
+        claude_edge_ip: &claude_trace.ip,
+        tun_ip: &tun_trace.ip,
+        country_code: &country_code,
+        country: &country,
+        city: &city,
+        isp: &isp,
+        asn: &asn,
+        ip_type: &ip_type,
+        is_hosting,
+        is_proxy_or_vpn,
+        is_tor,
+        is_broadcast,
+        region_supported,
+        dual_channel_match,
+        claude_edge_match,
+        dns_proxy: &dns_proxy,
+        dns_tun: &dns_tun,
+        dns_leak,
+        ipv6_leak,
+        ipv6_exposed_ip: ipv6_exposed_ip.as_deref(),
+        ippure_fraud_score,
+        proxycheck_risk,
+        combined_fraud_score,
+        ip_timezone: ip_timezone.as_deref(),
+        target_timezone: &cfg.target_tz,
+        timezone_aligned,
+        claude_warp: claude_trace.warp.as_deref(),
     };
+    let (final_score, grade, verdict, factors) = evaluate_purity_score(&signals);
 
     let report = PurityReport {
         checked_at,
@@ -599,8 +410,8 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
         ipv6_leak,
         ipv6_exposed_ip,
         purity_score: final_score,
-        grade: grade.to_string(),
-        verdict: verdict.to_string(),
+        grade,
+        verdict,
         factors,
     };
 

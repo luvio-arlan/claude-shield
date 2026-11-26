@@ -1,22 +1,27 @@
 mod config;
+mod detect;
 mod guard;
 mod patrol;
 mod probe;
 mod purity;
+mod purity_score;
 mod setup;
+mod uninstall;
 
 use chrono::Local;
 use config::{tz_short_and_full, ShieldConfig};
-use guard::{audit_local_defenses, hide_original_claude_app, kill_claude_desktop, LocalDefenseAudit};
+use detect::detect_environment;
+use guard::{audit_local_defenses, escape_applescript, hide_original_claude_app, kill_claude_desktop, LocalDefenseAudit};
 use patrol::run_daily_patrol;
 use probe::{full_telemetry_probe, quick_gate_probe, ApiLatencyMetrics, ChannelProbe};
 use purity::run_purity_audit;
-use setup::{detect_environment, run_setup, run_uninstall, SetupOptions};
 use serde::Serialize;
+use setup::{run_setup, SetupOptions};
 use std::env;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use uninstall::run_uninstall;
 
 #[derive(Serialize)]
 struct TelemetryJson {
@@ -83,7 +88,6 @@ async fn main() {
             }
         }
         "exec-cli" => {
-            // Usage: claude-shield-core exec-cli <real_claude_bin> [-- args...]
             let real_bin = args.get(2).cloned().unwrap_or_else(|| "/usr/local/bin/claude".to_string());
             let pass_args: Vec<String> = args.iter().skip(3).cloned().collect();
             cmd_exec_cli(&cfg, &real_bin, &pass_args).await;
@@ -133,7 +137,7 @@ async fn main() {
             let report = run_setup(&cfg, &opts);
             if json_mode {
                 println!("{}", serde_json::to_string(&report).unwrap_or_default());
-            } else {
+            } else if report.ok {
                 println!("🛡️  Claude Shield 一键部署完成");
                 for a in &report.actions {
                     println!("  ✅ {}", a);
@@ -141,6 +145,11 @@ async fn main() {
                 for w in &report.warnings {
                     println!("  ⚠️  {}", w);
                 }
+            } else {
+                for w in &report.warnings {
+                    eprintln!("  ❌ {}", w);
+                }
+                std::process::exit(1);
             }
         }
         "uninstall" => {
@@ -159,7 +168,7 @@ async fn main() {
             }
         }
         _ => {
-            println!("Claude Shield Core v3.2 (Native Rust Engine)");
+            println!("Claude Shield Core v{} (Native Rust Engine)", env!("CARGO_PKG_VERSION"));
             println!("Usage: claude-shield-core <telemetry|gate|purity|patrol|hide-original|detect|setup|uninstall|exec-cli|launch-desktop> [--json]");
         }
     }
@@ -339,7 +348,6 @@ fn apply_hardened_env(cmd: &mut Command, cfg: &ShieldConfig) {
     let orig_path = env::var("PATH").unwrap_or_default();
     let new_path = format!("{}:{}", guard_bin.display(), orig_path);
 
-    // Append ipv4first to NODE_OPTIONS to eliminate Node.js IPv6 leaks
     let existing_node_opts = env::var("NODE_OPTIONS").unwrap_or_default();
     let node_opts = if existing_node_opts.contains("--dns-result-order=") {
         existing_node_opts
@@ -384,7 +392,8 @@ async fn cmd_exec_cli(cfg: &ShieldConfig, real_bin: &str, pass_args: &[String]) 
     }
 
     eprintln!(
-        "\x1b[0;32m[Claude Shield v3]\x1b[0m ✅ IP={} ({}) | TZ={} | Proxy=127.0.0.1:{} | Gate={}ms | IPv4-Only",
+        "\x1b[0;32m[Claude Shield v{}]\x1b[0m ✅ IP={} ({}) | TZ={} | Proxy=127.0.0.1:{} | Gate={}ms | IPv4-Only",
+        env!("CARGO_PKG_VERSION"),
         gate.proxy_ip,
         gate.claude_colo.as_deref().unwrap_or("CF"),
         cfg.target_tz,
@@ -396,28 +405,21 @@ async fn cmd_exec_cli(cfg: &ShieldConfig, real_bin: &str, pass_args: &[String]) 
     cmd.args(pass_args);
     apply_hardened_env(&mut cmd, cfg);
 
-    // Replace current process with real Claude CLI (zero wrapper overhead!)
     let err = cmd.exec();
     eprintln!("\x1b[1;31m[Claude Shield]\x1b[0m 无法执行 {}: {}", real_bin, err);
     std::process::exit(127);
 }
 
 async fn cmd_launch_desktop(cfg: &ShieldConfig, force: bool) {
-    // 1. Auto-quarantine if /Applications/Claude.app reappeared
-    if Path::new("/Applications/Claude.app").exists() {
+    if cfg.hide_original && Path::new("/Applications/Claude.app").exists() {
         hide_original_claude_app(cfg);
     }
 
-    // 2. Fail-Closed dual-channel + claude.ai edge verification (unless --force)
     let mut verified_ip: Option<String> = None;
     if !force {
         let gate = evaluate_gate(cfg).await;
         if !gate.ok {
-            let clean = gate
-                .error
-                .unwrap_or_else(|| "出口 IP 校验未通过".into())
-                .replace('\\', "\\\\")
-                .replace('"', "'");
+            let clean = escape_applescript(&gate.error.unwrap_or_else(|| "出口 IP 校验未通过".into()));
             let _ = Command::new("/usr/bin/osascript")
                 .args([
                     "-e",
@@ -449,11 +451,9 @@ async fn cmd_launch_desktop(cfg: &ShieldConfig, force: bool) {
         std::process::exit(0);
     };
 
-    // 3. If already running: focus if hardened, otherwise kill & relaunch hardened
     let defenses = audit_local_defenses(cfg);
     if defenses.desktop_pid.is_some() {
-        if defenses.desktop_proxy_bound && defenses.desktop_quic_disabled {
-            // `open -a <exact app path>` works even after lsregister -u, switches Spaces, and reopens minimized/closed windows
+        if defenses.desktop_proxy_bound && defenses.desktop_quic_disabled && defenses.desktop_webrtc_locked {
             let _ = Command::new("/usr/bin/open")
                 .args(["-a", app_path.to_str().unwrap_or("/Applications/Claude.app")])
                 .status();
@@ -469,7 +469,6 @@ async fn cmd_launch_desktop(cfg: &ShieldConfig, force: bool) {
         let _ = std::fs::write(cfg.config_dir.join("last_launch_ip"), format!("{}\n", ip));
     }
 
-    // 4. Launch with hardened Electron network isolation (detached)
     let bin = app_path.join("Contents/MacOS/Claude");
     let mut cmd = Command::new(&bin);
     cmd.args([
@@ -501,7 +500,7 @@ async fn cmd_launch_desktop(cfg: &ShieldConfig, force: bool) {
             }
         }
         Err(e) => {
-            let safe_err = e.to_string().replace('\\', "\\\\").replace('"', "'");
+            let safe_err = escape_applescript(&e.to_string());
             let _ = Command::new("/usr/bin/osascript")
                 .args([
                     "-e",

@@ -20,9 +20,9 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   ARCH="$(uname -m)"
   swiftc -typecheck -target "${ARCH}-apple-macos13.0" \
     -framework Cocoa -framework SwiftUI -framework Network -framework QuartzCore \
-    "${REPO_ROOT}/app/ClaudeShieldApp.swift"
+    "${REPO_ROOT}/app/Sources/"*.swift
 else
-  echo "ERROR: macOS (swiftc) is required to verify app/ClaudeShieldApp.swift" >&2
+  echo "ERROR: macOS (swiftc) is required to verify app/Sources/*.swift" >&2
   exit 1
 fi
 

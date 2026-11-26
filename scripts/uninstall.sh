@@ -28,6 +28,31 @@ else
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/Claude.app" >/dev/null 2>&1 || true
     echo "✅ 已还原原版 /Applications/Claude.app"
   fi
+  if [[ -f "$HOME/.local/bin/claude" ]] && grep -qE "claude-shield|claude-guard" "$HOME/.local/bin/claude" 2>/dev/null; then
+    rm -f "$HOME/.local/bin/claude"
+  fi
+  for rc in "$HOME/.zshrc" "$HOME/.bash_profile"; do
+    if [[ -f "${rc}" ]] && grep -q "# >>> Claude Shield >>>" "${rc}" 2>/dev/null; then
+      /usr/bin/python3 - "${rc}" <<'PYEOF'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+out, skip = [], False
+for line in lines:
+    if line.strip() == "# >>> Claude Shield >>>":
+        skip = True
+        continue
+    if skip:
+        if line.strip() == "# <<< Claude Shield <<<":
+            skip = False
+        continue
+    out.append(line)
+while out and not out[-1]:
+    out.pop()
+p.write_text(("\n".join(out) + "\n") if out else "", encoding="utf-8")
+PYEOF
+    fi
+  done
   rm -rf "$HOME/.local/lib/claude-guard-bin" "$HOME/.config/claude-guard" "/Applications/Claude Shield.app"
   rm -f "$HOME/.local/bin/claude-shield" "$HOME/.local/bin/claude-shield-core" "$HOME/.local/bin/claude-guard.sh" "$HOME/.local/bin/claude-desktop-safe"
   echo "✅ Claude Shield 已卸载并还原"

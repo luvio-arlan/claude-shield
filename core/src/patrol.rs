@@ -21,27 +21,24 @@ pub struct PatrolReport {
 
 /// Daily & On-Demand Deep Security Patrol:
 /// - Runs full ip.net.coffee-grade IP purity + DNS/IPv6 leak audit
-/// - Auto-hides /Applications/Claude.app if Claude Desktop auto-updater recreated it
+/// - Auto-hides /Applications/Claude.app if enabled and Claude Desktop auto-updater recreated it
 /// - Audits Desktop & CLI processes and auto-kills unprotected/drifted sessions if `auto_kill` is true
-/// - Persists audit trail to ~/.config/claude-guard/patrol-history.jsonl
+/// - Persists bounded audit trail to ~/.config/claude-guard/patrol-history.jsonl
 /// - Notifies user via macOS Notification Center ONLY when anomalies or auto-heals occur
 pub async fn run_daily_patrol(cfg: &ShieldConfig, notify: bool, auto_kill: bool) -> PatrolReport {
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut alerts: Vec<String> = Vec::new();
     let mut auto_healed: Vec<String> = Vec::new();
 
-    // 1. Check if /Applications/Claude.app reappeared (e.g., after auto-update) and quarantine immediately
     let pre_defenses = audit_local_defenses(cfg);
-    if pre_defenses.original_app_exposed {
+    if cfg.hide_original && pre_defenses.original_app_exposed {
         let actions = hide_original_claude_app(cfg);
         auto_healed.extend(actions);
     }
 
-    // 2. Run full multi-source IP purity & leak audit
     let purity = run_purity_audit(cfg).await;
     let defenses = audit_local_defenses(cfg);
 
-    // 3. Evaluate anomalies
     if !purity.region_supported {
         alerts.push(format!("出口地区 {} 不受 Claude 支持（封号高危）", purity.country_code));
     }
@@ -79,10 +76,18 @@ pub async fn run_daily_patrol(cfg: &ShieldConfig, notify: bool, auto_kill: bool)
     if !defenses.sandbox_enabled {
         alerts.push("~/.claude/settings.json 的 Seatbelt 沙盒未开启".to_string());
     }
-    if defenses.desktop_pid.is_some() && !defenses.desktop_proxy_bound {
-        alerts.push("发现未绑定硬代理的 Claude 桌面版进程！".to_string());
+
+    let desktop_unprotected = defenses.desktop_pid.is_some()
+        && (!defenses.desktop_proxy_bound
+            || !defenses.desktop_quic_disabled
+            || !defenses.desktop_webrtc_locked);
+    let mut desktop_killed = false;
+
+    if desktop_unprotected {
+        alerts.push("发现未绑定硬代理或未封闭 QUIC/WebRTC 的 Claude 桌面版进程！".to_string());
         if auto_kill {
             kill_claude_desktop();
+            desktop_killed = true;
             auto_healed.push("已自动急停未受保护的 Claude 桌面版进程".to_string());
         }
     }
@@ -97,8 +102,11 @@ pub async fn run_daily_patrol(cfg: &ShieldConfig, notify: bool, auto_kill: bool)
         }
     }
 
-    // Auto-kill Desktop if IP drifted or unsupported region during patrol
-    if auto_kill && defenses.desktop_pid.is_some() && (!purity.dual_channel_match || !purity.region_supported) {
+    if auto_kill
+        && !desktop_killed
+        && defenses.desktop_pid.is_some()
+        && (!purity.dual_channel_match || !purity.region_supported)
+    {
         kill_claude_desktop();
         auto_healed.push("巡检发现 IP 异常，已自动急停 Claude 桌面版防裸连".to_string());
     }
@@ -117,7 +125,7 @@ pub async fn run_daily_patrol(cfg: &ShieldConfig, notify: bool, auto_kill: bool)
     };
 
     cfg.write_cache_json("last_patrol.json", &report);
-    cfg.append_jsonl("patrol-history.jsonl", &report);
+    cfg.append_jsonl_capped("patrol-history.jsonl", &report, 200);
 
     if notify && (!alerts.is_empty() || !auto_healed.is_empty()) {
         let summary = if !alerts.is_empty() {

@@ -19,7 +19,7 @@ pub struct ChannelProbe {
 impl ChannelProbe {
     pub fn unreachable() -> Self {
         Self {
-            ip: "不可达".to_string(),
+            ip: "无法连通".to_string(),
             latency_ms: None,
             colo: None,
             loc: None,
@@ -90,16 +90,16 @@ pub fn build_direct_v6_client(timeout_secs: u64) -> Result<Client, reqwest::Erro
         .build()
 }
 
-struct CfTrace {
-    ip: String,
-    colo: Option<String>,
-    loc: Option<String>,
-    tls: Option<String>,
-    http: Option<String>,
-    warp: Option<String>,
+pub(crate) struct CfTrace {
+    pub ip: String,
+    pub colo: Option<String>,
+    pub loc: Option<String>,
+    pub tls: Option<String>,
+    pub http: Option<String>,
+    pub warp: Option<String>,
 }
 
-fn parse_cf_trace(body: &str) -> CfTrace {
+pub(crate) fn parse_cf_trace(body: &str) -> CfTrace {
     let mut ip = String::new();
     let mut colo = None;
     let mut loc = None;
@@ -124,7 +124,7 @@ fn parse_cf_trace(body: &str) -> CfTrace {
     CfTrace { ip, colo, loc, tls, http, warp }
 }
 
-fn is_valid_ip_str(s: &str) -> bool {
+pub(crate) fn is_valid_ip_str(s: &str) -> bool {
     !s.is_empty() && s.len() <= 45 && !s.contains(char::is_whitespace) && s.parse::<IpAddr>().is_ok()
 }
 
@@ -178,100 +178,127 @@ pub async fn probe_trace_channel(client: &Client, primary_url: &str, measure_rtt
     for fallback in ["https://api.ipify.org", "https://ifconfig.me/ip"] {
         let t0 = Instant::now();
         if let Ok(resp) = client.get(fallback).send().await {
-            if let Ok(text) = resp.text().await {
-                let ip = text.trim().to_string();
-                if is_valid_ip_str(&ip) {
-                    let rtt = if measure_rtt {
-                        let t1 = Instant::now();
-                        if client.head(fallback).send().await.is_ok() {
-                            Some(t1.elapsed().as_millis().max(1) as u64)
+            if resp.status().is_success() {
+                if let Ok(text) = resp.text().await {
+                    let ip = text.trim().to_string();
+                    if is_valid_ip_str(&ip) {
+                        let rtt = if measure_rtt {
+                            let t1 = Instant::now();
+                            if client.head(fallback).send().await.is_ok() {
+                                Some(t1.elapsed().as_millis().max(1) as u64)
+                            } else {
+                                Some(t0.elapsed().as_millis().max(1) as u64)
+                            }
                         } else {
-                            Some(t0.elapsed().as_millis().max(1) as u64)
-                        }
-                    } else {
-                        None
-                    };
-                    return ChannelProbe {
-                        ip,
-                        latency_ms: rtt,
-                        colo: None,
-                        loc: None,
-                        tls: None,
-                        http: None,
-                        warp: None,
-                        reachable: true,
-                    };
+                            None
+                        };
+                        return ChannelProbe {
+                            ip,
+                            latency_ms: rtt,
+                            colo: None,
+                            loc: None,
+                            tls: None,
+                            http: None,
+                            warp: None,
+                            reachable: true,
+                        };
+                    }
                 }
             }
         }
     }
 
-    ChannelProbe {
-        ip: "无法连通".to_string(),
-        latency_ms: None,
-        colo: None,
-        loc: None,
-        tls: None,
-        http: None,
-        warp: None,
-        reachable: false,
+    ChannelProbe::unreachable()
+}
+
+const API_PROBE_URL: &str = "https://api.anthropic.com/";
+const API_WARM_SAMPLES: usize = 4;
+const API_SAMPLE_PACING_MS: u64 = 25;
+
+struct ApiWarmupState {
+    cold_connect_ms: u64,
+    status_code: Option<u16>,
+}
+
+/// Compute robust `(warm_rtt_ms, jitter_ms)` from warmed HTTP/2 RTT samples:
+/// - With >= 4 samples, trims the single highest outlier spike before taking the median RTT
+///   and symmetric half-range `(max - min) / 2` so one proxy/origin micro-stutter does not
+///   inflate `±` jitter, while genuinely unstable lines still report high jitter honestly.
+/// - With 2-3 samples, uses median/midpoint and symmetric half-range.
+fn compute_robust_latency(raw_samples: &[u64]) -> Option<(u64, u64)> {
+    if raw_samples.is_empty() {
+        return None;
+    }
+    let mut sorted = raw_samples.to_vec();
+    sorted.sort_unstable();
+
+    match sorted.as_slice() {
+        [a] => Some((*a, 0)),
+        [a, b] => {
+            let mid = (*a + *b) / 2;
+            let half_spread = (*b - *a) / 2;
+            Some((mid, half_spread))
+        }
+        [a, b, c] => {
+            let half_spread = (*c - *a) / 2;
+            Some((*b, half_spread))
+        }
+        many => {
+            // Trim single highest tail spike (1 of N) to suppress isolated proxy/origin stutters
+            let trimmed = &many[..many.len() - 1];
+            let median = trimmed[trimmed.len() / 2];
+            let half_spread = (trimmed[trimmed.len() - 1] - trimmed[0]) / 2;
+            Some((median, half_spread))
+        }
     }
 }
 
-/// Measure realistic Anthropic API 1-RTT latency:
-/// 1) Warmup request opens HTTP/2 TLS 1.3 tunnel to api.anthropic.com (records cold_connect_ms)
-/// 2) Two back-to-back warmed HEAD requests over the live HTTP/2 stream measure true interactive 1-RTT
-/// 3) Reports min(r1, r2) to suppress single-packet proxy micro-stutters + computes wire jitter
-pub async fn probe_anthropic_api_latency(client: &Client) -> ApiLatencyMetrics {
-    let url = "https://api.anthropic.com/";
-
+async fn warmup_anthropic_api(client: &Client) -> Option<ApiWarmupState> {
     let t_cold = Instant::now();
-    let warm_resp = match client.head(url).send().await {
-        Ok(r) => r,
-        Err(_) => {
-            return ApiLatencyMetrics {
-                warm_rtt_ms: None,
-                cold_connect_ms: None,
-                jitter_ms: None,
-                status_code: None,
-            }
-        }
-    };
-    let cold_ms = t_cold.elapsed().as_millis().max(1) as u64;
-    let status = Some(warm_resp.status().as_u16());
+    let warm_resp = client.head(API_PROBE_URL).send().await.ok()?;
+    let cold_connect_ms = t_cold.elapsed().as_millis().max(1) as u64;
+    let status_code = Some(warm_resp.status().as_u16());
     let _ = warm_resp.bytes().await;
+    Some(ApiWarmupState {
+        cold_connect_ms,
+        status_code,
+    })
+}
 
-    let mut samples: Vec<u64> = Vec::with_capacity(2);
-    for _ in 0..2 {
+async fn sample_anthropic_api_warm_rtt(client: &Client, warm: Option<ApiWarmupState>) -> ApiLatencyMetrics {
+    let Some(warm) = warm else {
+        return ApiLatencyMetrics {
+            warm_rtt_ms: None,
+            cold_connect_ms: None,
+            jitter_ms: None,
+            status_code: None,
+        };
+    };
+
+    let mut samples: Vec<u64> = Vec::with_capacity(API_WARM_SAMPLES);
+    for idx in 0..API_WARM_SAMPLES {
+        if idx > 0 {
+            tokio::time::sleep(Duration::from_millis(API_SAMPLE_PACING_MS)).await;
+        }
         let t = Instant::now();
-        if let Ok(r) = client.head(url).send().await {
+        if let Ok(r) = client.head(API_PROBE_URL).send().await {
             let _ = r.bytes().await;
             samples.push(t.elapsed().as_millis().max(1) as u64);
         }
     }
 
-    match samples.as_slice() {
-        [a, b] => {
-            let best = (*a).min(*b);
-            let jitter = (*a).abs_diff(*b);
-            ApiLatencyMetrics {
-                warm_rtt_ms: Some(best),
-                cold_connect_ms: Some(cold_ms),
-                jitter_ms: Some(jitter),
-                status_code: status,
-            }
-        }
-        [a] => ApiLatencyMetrics {
-            warm_rtt_ms: Some(*a),
-            cold_connect_ms: Some(cold_ms),
-            jitter_ms: Some(0),
-            status_code: status,
+    match compute_robust_latency(&samples) {
+        Some((warm_rtt_ms, jitter_ms)) => ApiLatencyMetrics {
+            warm_rtt_ms: Some(warm_rtt_ms),
+            cold_connect_ms: Some(warm.cold_connect_ms),
+            jitter_ms: Some(jitter_ms),
+            status_code: warm.status_code,
         },
-        _ => ApiLatencyMetrics {
+        None => ApiLatencyMetrics {
             warm_rtt_ms: None,
-            cold_connect_ms: Some(cold_ms),
+            cold_connect_ms: Some(warm.cold_connect_ms),
             jitter_ms: None,
-            status_code: status,
+            status_code: warm.status_code,
         },
     }
 }
@@ -293,16 +320,7 @@ pub async fn quick_gate_probe(cfg: &ShieldConfig) -> (ChannelProbe, ChannelProbe
             (proxy, tun, claude_edge)
         }
         _ => {
-            let err = ChannelProbe {
-                ip: "无法连通".to_string(),
-                latency_ms: None,
-                colo: None,
-                loc: None,
-                tls: None,
-                http: None,
-                warp: None,
-                reachable: false,
-            };
+            let err = ChannelProbe::unreachable();
             (err.clone(), err.clone(), err)
         }
     }
@@ -314,24 +332,20 @@ pub async fn full_telemetry_probe(cfg: &ShieldConfig) -> NetworkProbeResult {
     let proxy_client_api = build_proxy_client(cfg, 5);
     let direct_client = build_direct_v4_client(5);
 
-    let err_probe = ChannelProbe {
-        ip: "无法连通".to_string(),
-        latency_ms: None,
-        colo: None,
-        loc: None,
-        tls: None,
-        http: None,
-        warp: None,
-        reachable: false,
-    };
+    let err_probe = ChannelProbe::unreachable();
 
     let (claude_edge, tun, api_latency) = match (proxy_client_cf, proxy_client_api, direct_client) {
         (Ok(pc_cf), Ok(pc_api), Ok(dc)) => {
-            tokio::join!(
+            // Phase 1: probe CF/TUN channels while concurrently warming the HTTP/2 TLS 1.3 tunnel
+            // to api.anthropic.com so cold handshakes overlap without wasting wall-clock time.
+            let (claude_edge, tun, api_warm) = tokio::join!(
                 probe_trace_channel(&pc_cf, "https://claude.ai/cdn-cgi/trace", true),
                 probe_trace_channel(&dc, "https://1.1.1.1/cdn-cgi/trace", true),
-                probe_anthropic_api_latency(&pc_api)
-            )
+                warmup_anthropic_api(&pc_api)
+            );
+            // Phase 2: sample warmed HTTP/2 API RTT on a quiet proxy tunnel (zero concurrent burst contention).
+            let api_latency = sample_anthropic_api_warm_rtt(&pc_api, api_warm).await;
+            (claude_edge, tun, api_latency)
         }
         _ => (
             err_probe.clone(),
@@ -350,5 +364,50 @@ pub async fn full_telemetry_probe(cfg: &ShieldConfig) -> NetworkProbeResult {
         tun,
         claude_edge,
         api_latency,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_robust_latency, is_valid_ip_str, parse_cf_trace, ChannelProbe};
+
+    #[test]
+    fn robust_latency_suppresses_single_outlier_spike() {
+        assert_eq!(compute_robust_latency(&[315, 464, 319, 324]), Some((319, 4)));
+    }
+
+    #[test]
+    fn robust_latency_clean_line_reports_tight_jitter() {
+        assert_eq!(compute_robust_latency(&[238, 241, 237, 240]), Some((238, 1)));
+    }
+
+    #[test]
+    fn robust_latency_preserves_genuinely_unstable_jitter() {
+        assert_eq!(compute_robust_latency(&[250, 310, 380, 460]), Some((310, 65)));
+        assert_eq!(compute_robust_latency(&[306, 414, 405, 317]), Some((317, 49)));
+    }
+
+    #[test]
+    fn robust_latency_handles_small_sample_counts() {
+        assert_eq!(compute_robust_latency(&[]), None);
+        assert_eq!(compute_robust_latency(&[210]), Some((210, 0)));
+        assert_eq!(compute_robust_latency(&[200, 240]), Some((220, 20)));
+        assert_eq!(compute_robust_latency(&[200, 210, 230]), Some((210, 15)));
+    }
+
+    #[test]
+    fn parse_cf_trace_extracts_fields_and_validates_ip() {
+        let trace = parse_cf_trace("ip=45.77.12.34\ncolo=LAX\nloc=US\ntls=TLSv1.3\nhttp=http/2\nwarp=off\n");
+        assert_eq!(trace.ip, "45.77.12.34");
+        assert_eq!(trace.colo.as_deref(), Some("LAX"));
+        assert_eq!(trace.loc.as_deref(), Some("US"));
+        assert_eq!(trace.tls.as_deref(), Some("TLSv1.3"));
+        assert_eq!(trace.http.as_deref(), Some("http/2"));
+        assert_eq!(trace.warp.as_deref(), Some("off"));
+        assert!(is_valid_ip_str(&trace.ip));
+        assert!(is_valid_ip_str("2001:db8::1"));
+        assert!(!is_valid_ip_str("45.77.12.34/bad"));
+        assert!(!is_valid_ip_str("<html>error</html>"));
+        assert_eq!(ChannelProbe::unreachable().ip, "无法连通");
     }
 }
