@@ -1,334 +1,426 @@
 import Cocoa
 import SwiftUI
 import Combine
+import Network
 
-// MARK: - Region Helper
+// MARK: - Rust Core Data Models
 
-private func tzDisplayNames(for tz: String) -> (short: String, full: String) {
-    let cityRaw = tz.split(separator: "/").last.map(String.init) ?? tz
-    let full = cityRaw.replacingOccurrences(of: "_", with: " ")
-    let shortMap: [String: String] = [
-        "Los Angeles": "LA",
-        "New York": "NY",
-        "San Francisco": "SF",
-        "Chicago": "CHI",
-        "Singapore": "SG",
-        "Hong Kong": "HK",
-        "Tokyo": "TYO",
-        "London": "LDN",
-        "Frankfurt": "FRA",
-        "Amsterdam": "AMS",
-        "Seattle": "SEA",
-        "Dallas": "DAL",
-        "Phoenix": "PHX",
-        "Denver": "DEN"
-    ]
-    let short = shortMap[full] ?? String(full.prefix(6))
-    return (short, full)
+struct ChannelProbeModel: Codable, Sendable {
+    let ip: String
+    let latency_ms: Int?
+    let colo: String?
+    let loc: String?
+    let tls: String?
+    let http: String?
+    let warp: String?
+    let reachable: Bool
 }
 
-// MARK: - Data Model
+struct ApiLatencyModel: Codable, Sendable {
+    let warm_rtt_ms: Int?
+    let cold_connect_ms: Int?
+    let jitter_ms: Int?
+    let status_code: Int?
+}
 
-struct TelemetrySnapshot: Sendable {
-    let expectedIP: String
-    let proxyPort: String
-    let targetTZ: String
-    let proxyIP: String
-    let proxyLatencyMs: Int?
-    let proxyColo: String?
-    let tunIP: String
-    let tunLatencyMs: Int?
-    let apiLatencyMs: Int?
-    let oauthLocked: Bool
-    let originalHidden: Bool
-    let sandboxEnabled: Bool
-    let desktopPID: String?
-    let desktopProxyBound: Bool
-    let cliReady: Bool
-    let checkedAt: String
+struct LocalDefenseModel: Codable, Sendable {
+    let oauth_locked: Bool
+    let original_hidden: Bool
+    let original_app_exposed: Bool
+    let sandbox_enabled: Bool
+    let telemetry_disabled: Bool
+    let desktop_pid: String?
+    let desktop_proxy_bound: Bool
+    let desktop_quic_disabled: Bool
+    let desktop_webrtc_locked: Bool
+    let unprotected_cli_pids: [String]
+    let cli_ready: Bool
+    let login_item_enabled: Bool
+    let daily_patrol_enabled: Bool
+}
 
-    var regionShort: String { tzDisplayNames(for: targetTZ).short }
-    var regionFull: String { tzDisplayNames(for: targetTZ).full }
+struct TelemetrySnapshot: Codable, Sendable {
+    let expected_ip: String
+    let proxy_port: Int
+    let target_tz: String
+    let region_short: String
+    let region_full: String
+    let proxy: ChannelProbeModel
+    let tun: ChannelProbeModel
+    let claude_edge: ChannelProbeModel
+    let api_latency: ApiLatencyModel
+    let defenses: LocalDefenseModel
+    let checked_at: String
 
-    var proxyOK: Bool { !expectedIP.isEmpty && expectedIP != "未配置" && proxyIP == expectedIP }
-    var tunOK: Bool { !expectedIP.isEmpty && expectedIP != "未配置" && tunIP == expectedIP }
-    var desktopRunning: Bool { desktopPID != nil }
-    var desktopUnprotected: Bool { desktopRunning && !desktopProxyBound }
+    var proxyOK: Bool { !expected_ip.isEmpty && expected_ip != "未配置" && proxy.reachable && proxy.ip == expected_ip }
+    var tunOK: Bool { !expected_ip.isEmpty && expected_ip != "未配置" && tun.reachable && tun.ip == expected_ip }
+    var desktopRunning: Bool { defenses.desktop_pid != nil }
+    var desktopUnprotected: Bool { desktopRunning && (!defenses.desktop_proxy_bound || !defenses.desktop_quic_disabled) }
+    var hasUnprotectedCLI: Bool { !defenses.unprotected_cli_pids.isEmpty }
 
-    /// True if either channel returned a real IP that does NOT match expectedIP (definite node drift / leak)
     var isConfirmedIPDrift: Bool {
-        guard !expectedIP.isEmpty && expectedIP != "未配置" else { return false }
-        let proxyDrifted = !proxyIP.isEmpty && proxyIP != "..." && proxyIP != "无法连通" && proxyIP != expectedIP
-        let tunDrifted = !tunIP.isEmpty && tunIP != "..." && tunIP != "无法连通" && tunIP != expectedIP
+        guard !expected_ip.isEmpty && expected_ip != "未配置" else { return false }
+        let proxyDrifted = proxy.reachable && proxy.ip != expected_ip
+        let tunDrifted = tun.reachable && tun.ip != expected_ip
         return proxyDrifted || tunDrifted
     }
 
-    var isSafe: Bool { proxyOK && tunOK && !desktopUnprotected }
+    var isSafe: Bool { proxyOK && tunOK && !desktopUnprotected && !hasUnprotectedCLI }
+
     var defenseScore: Int {
         var s = 0
         if proxyOK { s += 1 }
         if tunOK { s += 1 }
-        if oauthLocked { s += 1 }
-        if originalHidden { s += 1 }
-        if sandboxEnabled { s += 1 }
-        if !desktopUnprotected && (cliReady || desktopRunning) { s += 1 }
+        if defenses.oauth_locked { s += 1 }
+        if defenses.original_hidden { s += 1 }
+        if defenses.sandbox_enabled && defenses.telemetry_disabled { s += 1 }
+        if !desktopUnprotected && !hasUnprotectedCLI && (defenses.cli_ready || desktopRunning) { s += 1 }
+        if defenses.login_item_enabled { s += 1 }
+        if defenses.daily_patrol_enabled { s += 1 }
         return s
     }
 
     static let initial = TelemetrySnapshot(
-        expectedIP: "检测中...",
-        proxyPort: "7897",
-        targetTZ: "America/Los_Angeles",
-        proxyIP: "...",
-        proxyLatencyMs: nil,
-        proxyColo: nil,
-        tunIP: "...",
-        tunLatencyMs: nil,
-        apiLatencyMs: nil,
-        oauthLocked: false,
-        originalHidden: false,
-        sandboxEnabled: false,
-        desktopPID: nil,
-        desktopProxyBound: true,
-        cliReady: false,
-        checkedAt: "--:--:--"
+        expected_ip: "检测中...",
+        proxy_port: 7897,
+        target_tz: "America/Los_Angeles",
+        region_short: "LA",
+        region_full: "Los Angeles",
+        proxy: ChannelProbeModel(ip: "...", latency_ms: nil, colo: nil, loc: nil, tls: nil, http: nil, warp: nil, reachable: false),
+        tun: ChannelProbeModel(ip: "...", latency_ms: nil, colo: nil, loc: nil, tls: nil, http: nil, warp: nil, reachable: false),
+        claude_edge: ChannelProbeModel(ip: "...", latency_ms: nil, colo: nil, loc: nil, tls: nil, http: nil, warp: nil, reachable: false),
+        api_latency: ApiLatencyModel(warm_rtt_ms: nil, cold_connect_ms: nil, jitter_ms: nil, status_code: nil),
+        defenses: LocalDefenseModel(
+            oauth_locked: false,
+            original_hidden: false,
+            original_app_exposed: false,
+            sandbox_enabled: false,
+            telemetry_disabled: false,
+            desktop_pid: nil,
+            desktop_proxy_bound: true,
+            desktop_quic_disabled: true,
+            desktop_webrtc_locked: true,
+            unprotected_cli_pids: [],
+            cli_ready: false,
+            login_item_enabled: false,
+            daily_patrol_enabled: false
+        ),
+        checked_at: "--:--:--"
     )
 }
 
-// MARK: - Shell Telemetry Probe (Off-Main)
+struct RiskFactorModel: Codable, Sendable, Identifiable {
+    var id: String { "\(title)-\(detail)" }
+    let severity: String
+    let title: String
+    let detail: String
+    let penalty: Int
+}
 
-private enum TelemetryProbe {
-    static func run(_ path: String, _ args: [String]) -> (output: String, ms: Int) {
-        let start = CFAbsoluteTimeGetCurrent()
+struct DnsProbeModel: Codable, Sendable {
+    let ip: String?
+    let geo: String?
+    let leaked: Bool
+}
+
+struct PurityReport: Codable, Sendable {
+    let checked_at: String
+    let exit_ip: String
+    let expected_ip: String
+    let claude_edge_ip: String
+    let tun_ip: String
+    let dual_channel_match: Bool
+    let claude_edge_match: Bool
+    let country_code: String
+    let country: String
+    let region: String
+    let city: String
+    let isp: String
+    let asn: String
+    let ip_type: String
+    let is_residential: Bool
+    let is_hosting: Bool
+    let is_proxy_or_vpn: Bool
+    let is_tor: Bool
+    let is_broadcast: Bool
+    let region_supported: Bool
+    let ip_timezone: String?
+    let target_timezone: String
+    let timezone_aligned: Bool
+    let claude_colo: String?
+    let claude_tls: String?
+    let claude_warp: String?
+    let ippure_fraud_score: Int?
+    let proxycheck_risk: Int?
+    let combined_fraud_score: Int?
+    let dns_proxy: DnsProbeModel
+    let dns_tun: DnsProbeModel
+    let dns_leak: Bool
+    let ipv6_leak: Bool
+    let ipv6_exposed_ip: String?
+    let purity_score: Int
+    let grade: String
+    let verdict: String
+    let factors: [RiskFactorModel]
+}
+
+struct PatrolReportModel: Codable, Sendable {
+    let timestamp: String
+    let passed: Bool
+    let purity_score: Int
+    let grade: String
+    let alerts: [String]
+    let auto_healed: [String]
+    let purity: PurityReport
+    let defenses: LocalDefenseModel
+}
+
+// MARK: - Rust Core Bridge (Single-Binary Zero-Fork-Overhead Engine)
+
+private enum RustCoreBridge {
+    static var coreBinaryPath: String {
+        if let bundled = Bundle.main.executableURL?
+            .deletingLastPathComponent()
+            .appendingPathComponent("claude-shield-core").path,
+           FileManager.default.isExecutableFile(atPath: bundled) {
+            return bundled
+        }
+        let localBin = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/claude-shield-core").path
+        return localBin
+    }
+
+    static var cacheDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/claude-guard")
+    }
+
+    static func loadCachedTelemetry() -> TelemetrySnapshot? {
+        let url = cacheDir.appendingPathComponent("last_telemetry.json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(TelemetrySnapshot.self, from: data)
+    }
+
+    static func loadCachedPurity() -> PurityReport? {
+        let url = cacheDir.appendingPathComponent("last_purity.json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(PurityReport.self, from: data)
+    }
+
+    static func runCore(_ args: [String]) -> Data? {
+        let bin = coreBinaryPath
+        guard FileManager.default.isExecutableFile(atPath: bin) else { return nil }
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: path)
+        task.executableURL = URL(fileURLWithPath: bin)
         task.arguments = args
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
         do {
             try task.run()
-            task.waitUntilExit()
-            let elapsed = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return (str, elapsed)
+            task.waitUntilExit()
+            return data.isEmpty ? nil : data
         } catch {
-            return ("", 0)
+            return nil
         }
     }
 
-    /// Fresh-route IP check + 2nd keep-alive HTTP/2 request for exact 1-RTT wire latency (zero TLS/handshake inflation, zero stale-socket blindness)
-    static func fetchIPAndExactRTT(viaProxy: Bool, port: String) -> (ip: String, ms: Int?, colo: String?) {
-        let proxyArgs: [String] = viaProxy ? ["-x", "http://127.0.0.1:\(port)"] : ["--noproxy", "*"]
-
-        // Primary: Cloudflare trace (2-step keep-alive on a fresh connection: req1 verifies fresh route IP + colo, req2 measures pure 1-RTT)
-        let traceArgs = ["-4", "-fsS", "--http2", "--max-time", "4"] + proxyArgs + [
-            "https://1.1.1.1/cdn-cgi/trace",
-            "--next",
-            "-4", "-fsS", "--http2", "--max-time", "3", "-I", "-o", "/dev/null",
-            "-w", "\n__EXACT_RTT__:%{time_starttransfer}"
-        ] + proxyArgs + ["https://1.1.1.1/cdn-cgi/trace"]
-
-        let traceRes = run("/usr/bin/curl", traceArgs)
-        if !traceRes.output.isEmpty {
-            let parts = traceRes.output.components(separatedBy: "\n__EXACT_RTT__:")
-            let body = parts.first ?? ""
-            let ip = body
-                .split(separator: "\n")
-                .first(where: { $0.hasPrefix("ip=") })
-                .map { String($0.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
-            let colo = body
-                .split(separator: "\n")
-                .first(where: { $0.hasPrefix("colo=") })
-                .map { String($0.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines) }
-
-            if !ip.isEmpty, ip.count <= 45, !ip.contains(" ") {
-                var rttMs: Int? = nil
-                if parts.count > 1, let sec = Double(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)), sec > 0 {
-                    rttMs = max(1, Int((sec * 1000.0).rounded()))
-                }
-                return (ip, rttMs, colo)
-            }
-        }
-
-        // Fallbacks: api.ipify.org, ifconfig.me
-        for url in ["https://api.ipify.org", "https://ifconfig.me/ip"] {
-            let args = ["-4", "-fsS", "--max-time", "4", "-w", "\n__TIMING__:%{time_appconnect} %{time_starttransfer} %{time_total}"] + proxyArgs + [url]
-            let res = run("/usr/bin/curl", args)
-            guard !res.output.isEmpty else { continue }
-            let parts = res.output.components(separatedBy: "\n__TIMING__:")
-            let ip = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !ip.isEmpty, ip.count <= 45, !ip.contains(" ") else { continue }
-            var rttMs: Int? = nil
-            if parts.count > 1 {
-                let nums = parts[1].trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ").compactMap { Double($0) }
-                if nums.count == 3 {
-                    let delta = (nums[0] > 0 && nums[1] > nums[0]) ? (nums[1] - nums[0]) : nums[2]
-                    if delta > 0 { rttMs = max(1, Int((delta * 1000.0).rounded())) }
-                }
-            }
-            return (ip, rttMs, nil)
-        }
-        return ("无法连通", nil, nil)
+    static func fetchTelemetry() -> TelemetrySnapshot? {
+        guard let data = runCore(["telemetry"]) else { return nil }
+        return try? JSONDecoder().decode(TelemetrySnapshot.self, from: data)
     }
 
-    /// Measure exact 1-RTT wire latency directly to Anthropic API (api.anthropic.com) via 2-step HTTP/2 keep-alive
-    static func fetchAnthropicAPIRTT(port: String) -> Int? {
-        let proxyArgs = ["-x", "http://127.0.0.1:\(port)"]
-        let args = ["-4", "-sS", "--http2", "--max-time", "4", "-I", "-o", "/dev/null"] + proxyArgs + [
-            "https://api.anthropic.com",
-            "--next",
-            "-4", "-sS", "--http2", "--max-time", "3", "-I", "-o", "/dev/null",
-            "-w", "%{time_starttransfer}"
-        ] + proxyArgs + ["https://api.anthropic.com"]
-
-        let res = run("/usr/bin/curl", args)
-        if let sec = Double(res.output), sec > 0 {
-            return max(1, Int((sec * 1000.0).rounded()))
-        }
-        return nil
+    static func fetchPurity() -> PurityReport? {
+        guard let data = runCore(["purity", "--json"]) else { return nil }
+        return try? JSONDecoder().decode(PurityReport.self, from: data)
     }
 
-    static func collect() -> TelemetrySnapshot {
+    static func runPatrol(notify: Bool, autoKill: Bool) -> PatrolReportModel? {
+        var args = ["patrol", "--json"]
+        if notify { args.append("--notify") }
+        if !autoKill { args.append("--no-kill") }
+        guard let data = runCore(args) else { return nil }
+        return try? JSONDecoder().decode(PatrolReportModel.self, from: data)
+    }
+
+    static func hideOriginalApp() -> [String] {
+        guard let data = runCore(["hide-original", "--json"]),
+              let items = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return items
+    }
+
+    static func toggleLaunchAgent(enabled: Bool) -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let fm = FileManager.default
-        let cfgDir = home.appendingPathComponent(".config/claude-guard")
+        let agentsDir = home.appendingPathComponent("Library/LaunchAgents")
+        let plistURL = agentsDir.appendingPathComponent("com.local.claude.shield.radar.plist")
+        let uid = getuid()
 
-        let expectedIP = (try? String(contentsOf: cfgDir.appendingPathComponent("expected_ip"), encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "未配置"
-
-        let rawPort = (try? String(contentsOf: cfgDir.appendingPathComponent("proxy_port"), encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let proxyPort = rawPort.isEmpty ? "7897" : rawPort
-
-        let rawTZ = (try? String(contentsOf: cfgDir.appendingPathComponent("target_tz"), encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let targetTZ = rawTZ.isEmpty ? "America/Los_Angeles" : rawTZ
-
-        // Run Proxy IP+RTT, TUN IP+RTT, and real Anthropic API 1-RTT in parallel
-        let group = DispatchGroup()
-        var proxyRes: (ip: String, ms: Int?, colo: String?) = ("无法连通", nil, nil)
-        var tunRes: (ip: String, ms: Int?, colo: String?) = ("无法连通", nil, nil)
-        var apiRtt: Int? = nil
-
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            proxyRes = fetchIPAndExactRTT(viaProxy: true, port: proxyPort)
-            group.leave()
+        if enabled {
+            try? FileManager.default.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+            let plist = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+              <key>Label</key><string>com.local.claude.shield.radar</string>
+              <key>ProgramArguments</key>
+              <array>
+                <string>/Applications/Claude Shield.app/Contents/MacOS/ClaudeShield</string>
+                <string>--radar-only</string>
+              </array>
+              <key>RunAtLoad</key><true/>
+              <key>KeepAlive</key><false/>
+              <key>ProcessType</key><string>Interactive</string>
+            </dict>
+            </plist>
+            """
+            do {
+                try plist.write(to: plistURL, atomically: true, encoding: .utf8)
+                let boot = Process()
+                boot.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+                boot.arguments = ["bootstrap", "gui/\(uid)", plistURL.path]
+                try? boot.run()
+                boot.waitUntilExit()
+                return true
+            } catch {
+                return false
+            }
+        } else {
+            let bootout = Process()
+            bootout.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            bootout.arguments = ["bootout", "gui/\(uid)", plistURL.path]
+            try? bootout.run()
+            bootout.waitUntilExit()
+            try? FileManager.default.removeItem(at: plistURL)
+            return false
         }
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            tunRes = fetchIPAndExactRTT(viaProxy: false, port: proxyPort)
-            group.leave()
-        }
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            apiRtt = fetchAnthropicAPIRTT(port: proxyPort)
-            group.leave()
-        }
-        group.wait()
-
-        let oauthPath = home.appendingPathComponent(".local/lib/claude-guard-bin/open").path
-        let oauthLocked = fm.isExecutableFile(atPath: oauthPath)
-
-        let origInApps = fm.fileExists(atPath: "/Applications/Claude.app")
-        let origInVault = fm.fileExists(atPath: home.appendingPathComponent(".local/apps/Claude.app").path)
-        let originalHidden = !origInApps && origInVault
-
-        let settingsPath = home.appendingPathComponent(".claude/settings.json").path
-        let settingsText = (try? String(contentsOfFile: settingsPath, encoding: .utf8)) ?? ""
-        let sandboxEnabled = settingsText.contains("\"enabled\": true") || settingsText.contains("\"enabled\":true")
-
-        // Process-level proxy-binding audit for running Claude Desktop
-        let pgrepRes = run("/usr/bin/pgrep", ["-x", "Claude"])
-        let desktopPID = pgrepRes.output.split(separator: "\n").first.map(String.init)
-        var desktopProxyBound = true
-        if let pid = desktopPID {
-            let psRes = run("/bin/ps", ["-p", pid, "-o", "args="])
-            desktopProxyBound = psRes.output.contains("--proxy-server=http://127.0.0.1:\(proxyPort)")
-        }
-
-        let cliReady = fm.isExecutableFile(atPath: home.appendingPathComponent(".local/bin/claude").path)
-
-        let df = DateFormatter()
-        df.dateFormat = "HH:mm:ss"
-
-        return TelemetrySnapshot(
-            expectedIP: expectedIP,
-            proxyPort: proxyPort,
-            targetTZ: targetTZ,
-            proxyIP: proxyRes.ip,
-            proxyLatencyMs: proxyRes.ms,
-            proxyColo: proxyRes.colo,
-            tunIP: tunRes.ip,
-            tunLatencyMs: tunRes.ms,
-            apiLatencyMs: apiRtt,
-            oauthLocked: oauthLocked,
-            originalHidden: originalHidden,
-            sandboxEnabled: sandboxEnabled,
-            desktopPID: desktopPID,
-            desktopProxyBound: desktopProxyBound,
-            cliReady: cliReady,
-            checkedAt: df.string(from: Date())
-        )
     }
 }
 
 // MARK: - ViewModel
 
+enum ShieldTab: String, CaseIterable {
+    case radar = "实时雷达"
+    case purity = "纯净度体检"
+}
+
 @MainActor
 final class ShieldViewModel: ObservableObject {
-    @Published var snapshot: TelemetrySnapshot = .initial
+    @Published var snapshot: TelemetrySnapshot
+    @Published var purity: PurityReport?
+    @Published var selectedTab: ShieldTab = .radar
     @Published var isRefreshing: Bool = false
+    @Published var isCheckingPurity: Bool = false
+    @Published var isPatrolling: Bool = false
     @Published var pulse: Bool = false
     @Published var autoKillOnBreach: Bool {
         didSet { UserDefaults.standard.set(autoKillOnBreach, forKey: "autoKillOnBreach") }
     }
+    @Published var loginAutoStart: Bool = false
     @Published var toastMessage: String?
 
-    var onStatusChange: ((TelemetrySnapshot) -> Void)?
+    var onStatusChange: ((TelemetrySnapshot, PurityReport?) -> Void)?
     private var timer: Timer?
+    private var purityTimer: Timer?
+    private var pathMonitor: NWPathMonitor?
+    private var lastNetworkStatus: NWPath.Status?
     private var consecutiveUnreachableCount = 0
 
     init() {
         self.autoKillOnBreach = UserDefaults.standard.object(forKey: "autoKillOnBreach") as? Bool ?? true
+        // Instant startup: hydrate cached state in <5ms before first network probe completes
+        let cachedSnap = RustCoreBridge.loadCachedTelemetry() ?? .initial
+        self.snapshot = cachedSnap
+        self.purity = RustCoreBridge.loadCachedPurity()
+        self.loginAutoStart = cachedSnap.defenses.login_item_enabled
     }
 
-    func startPolling() {
+    func startMonitoring() {
         refresh()
+
+        // 15s lightweight Rust telemetry polling
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+
+        // Delayed initial purity check (1.8s after launch for zero startup lag) + every 4h automatic re-audit
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            self?.refreshPurity(silent: true)
+        }
+        purityTimer?.invalidate()
+        purityTimer = Timer.scheduledTimer(withTimeInterval: 14400.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.runPatrolNow(silent: true) }
+        }
+
+        // Real-time macOS Sleep/Wake instant drift guard
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor in
+                self?.consecutiveUnreachableCount = 0
                 self?.refresh()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    self?.refresh()
+                }
             }
         }
+
+        // Real-time Network Interface / VPN Path Monitor (instant reaction to Wi-Fi/TUN switches)
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in
+                guard let self = self else { return }
+                let changed = self.lastNetworkStatus != nil && self.lastNetworkStatus != path.status
+                self.lastNetworkStatus = path.status
+                if changed {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        self.refresh()
+                    }
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue.global(qos: .utility))
+        self.pathMonitor = monitor
     }
 
     func refresh() {
         guard !isRefreshing else { return }
         isRefreshing = true
-        Task.detached(priority: .utility) {
-            let result = TelemetryProbe.collect()
+        Task.detached(priority: .userInitiated) {
+            let result = RustCoreBridge.fetchTelemetry()
             await MainActor.run {
-                self.snapshot = result
                 self.isRefreshing = false
-                self.onStatusChange?(result)
+                guard let result = result else { return }
+                self.snapshot = result
+                self.loginAutoStart = result.defenses.login_item_enabled
+                self.onStatusChange?(result, self.purity)
+
+                // Auto-heal if /Applications/Claude.app reappeared (e.g. after auto-update)
+                if result.defenses.original_app_exposed {
+                    Task.detached(priority: .utility) {
+                        _ = RustCoreBridge.hideOriginalApp()
+                    }
+                }
 
                 if result.isSafe {
                     self.consecutiveUnreachableCount = 0
                     return
                 }
 
-                // Smart Fail-Closed Auto-Kill:
-                // 1) Definite IP drift or unprotected Claude process -> instant 0s kill
-                // 2) Transient unreachable/timeout -> 1 immediate fast re-check before killing (zero false positives)
-                if self.autoKillOnBreach && result.desktopRunning {
+                // Smart Fail-Closed Auto-Kill (Desktop + unprotected CLI)
+                if self.autoKillOnBreach {
                     if result.desktopUnprotected {
-                        self.emergencyKillClaude(reason: "检测到未绑定硬代理的 Claude 桌面版进程（#\(result.desktopPID ?? "?")），已自动急停防裸连！")
-                    } else if result.isConfirmedIPDrift {
-                        self.emergencyKillClaude(reason: "检测到出口 IP 漂移（代理: \(result.proxyIP) / TUN: \(result.tunIP)），已自动急停 Claude 桌面版以防裸连！")
-                    } else {
+                        self.emergencyKillClaude(reason: "检测到未绑定硬代理或未禁 QUIC 的 Claude 桌面版进程（#\(result.defenses.desktop_pid ?? "?")），已自动急停防裸连！")
+                    } else if result.hasUnprotectedCLI {
+                        self.killUnprotectedCLI(pids: result.defenses.unprotected_cli_pids)
+                    } else if result.desktopRunning && result.isConfirmedIPDrift {
+                        self.emergencyKillClaude(reason: "检测到出口 IP 漂移（Claude 边缘: \(result.proxy.ip) / TUN: \(result.tun.ip)），已自动急停 Claude 桌面版！")
+                    } else if result.desktopRunning {
                         self.consecutiveUnreachableCount += 1
                         if self.consecutiveUnreachableCount >= 2 {
                             self.consecutiveUnreachableCount = 0
@@ -344,17 +436,99 @@ final class ShieldViewModel: ObservableObject {
         }
     }
 
-    func launchClaudeSafe() {
-        let script = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin/claude-desktop-safe").path
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/bash")
-        task.arguments = [script]
-        try? task.run()
-        showToast(snapshot.desktopRunning ? "已切换至 Claude 桌面版" : "正在验真并启动 Claude 桌面版...")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+    func refreshPurity(silent: Bool = false) {
+        guard !isCheckingPurity else { return }
+        isCheckingPurity = true
+        Task.detached(priority: .userInitiated) {
+            let report = RustCoreBridge.fetchPurity()
+            await MainActor.run {
+                self.isCheckingPurity = false
+                if let report = report {
+                    self.purity = report
+                    self.onStatusChange?(self.snapshot, report)
+                    if !silent {
+                        self.showToast("纯净度体检完成：\(report.purity_score) 分（\(report.grade) 级）")
+                    }
+                } else if !silent {
+                    self.showToast("纯净度体检失败，请检查代理连通性")
+                }
+            }
+        }
+    }
+
+    func runPatrolNow(silent: Bool = false) {
+        guard !isPatrolling else { return }
+        isPatrolling = true
+        let autoKill = autoKillOnBreach
+        Task.detached(priority: .utility) {
+            let report = RustCoreBridge.runPatrol(notify: silent, autoKill: autoKill)
+            await MainActor.run {
+                self.isPatrolling = false
+                if let report = report {
+                    self.purity = report.purity
+                    self.refresh()
+                    if !silent {
+                        if report.passed {
+                            self.showToast("全链路巡检通过 · 纯净度 \(report.purity_score)/100 (\(report.grade))")
+                        } else {
+                            self.showToast("巡检发现 \(report.alerts.count) 项异常，请查看纯净度面板")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func hideOriginalAppNow() {
+        Task.detached(priority: .userInitiated) {
+            let actions = RustCoreBridge.hideOriginalApp()
+            await MainActor.run {
+                self.showToast(actions.isEmpty ? "原版 Claude.app 已处于隐藏状态" : "已自动隐藏原版 Claude.app 图标")
+                self.refresh()
+            }
+        }
+    }
+
+    func setLoginAutoStart(_ enabled: Bool) {
+        let actual = RustCoreBridge.toggleLaunchAgent(enabled: enabled)
+        loginAutoStart = actual
+        showToast(actual ? "已开启开机自启保护雷达" : "已关闭开机自启雷达")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             self?.refresh()
         }
+    }
+
+    func launchClaudeSafe() {
+        let bin = RustCoreBridge.coreBinaryPath
+        let task = Process()
+        if FileManager.default.isExecutableFile(atPath: bin) {
+            task.executableURL = URL(fileURLWithPath: bin)
+            task.arguments = ["launch-desktop"]
+        } else {
+            let script = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".local/bin/claude-desktop-safe").path
+            task.executableURL = URL(fileURLWithPath: "/bin/bash")
+            task.arguments = [script]
+        }
+        try? task.run()
+        showToast(snapshot.desktopRunning ? "已切换至 Claude 桌面版" : "正在 Rust 极速验真并启动 Claude...")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            self?.refresh()
+        }
+    }
+
+    private func killUnprotectedCLI(pids: [String]) {
+        for pid in pids {
+            let t = Process()
+            t.executableURL = URL(fileURLWithPath: "/bin/kill")
+            t.arguments = ["-9", pid]
+            try? t.run()
+        }
+        let alert = Process()
+        alert.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        alert.arguments = ["-e", "display notification \"发现未走安全门禁的 Claude Code 进程，已自动终止防裸连！\" with title \"Claude Shield 熔断急停\" sound name \"Sosumi\""]
+        try? alert.run()
+        showToast("已终止未受保护的 CLI 进程")
     }
 
     func emergencyKillClaude(reason: String? = nil) {
@@ -365,9 +539,10 @@ final class ShieldViewModel: ObservableObject {
         task.waitUntilExit()
 
         if let reason = reason {
+            let safe = reason.replacingOccurrences(of: "\"", with: "'")
             let alert = Process()
             alert.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            alert.arguments = ["-e", "display notification \"\(reason)\" with title \"Claude Shield 熔断急停\" sound name \"Sosumi\""]
+            alert.arguments = ["-e", "display notification \"\(safe)\" with title \"Claude Shield 熔断急停\" sound name \"Sosumi\""]
             try? alert.run()
         }
         showToast("已执行紧急急停（Claude 进程已终止）")
@@ -389,11 +564,10 @@ final class ShieldViewModel: ObservableObject {
             item.setData(tiff, forType: .tiff)
         }
         pb.writeObjects([item])
-        showToast("诊断截图已复制，可直接 ⌘V 粘贴")
+        showToast("2x 高清诊断截图已复制，可直接 ⌘V 粘贴")
     }
 
     func quitMonitorOnly() {
-        // Quitting the menu bar radar never disables hard-bound proxy, CLI gate, OAuth lock, or Seatbelt sandbox.
         NSApplication.shared.terminate(nil)
     }
 
@@ -401,7 +575,7 @@ final class ShieldViewModel: ObservableObject {
         withAnimation(.easeInOut(duration: 0.2)) {
             toastMessage = msg
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
             withAnimation(.easeInOut(duration: 0.2)) {
                 if self?.toastMessage == msg {
                     self?.toastMessage = nil
@@ -411,7 +585,7 @@ final class ShieldViewModel: ObservableObject {
     }
 }
 
-// MARK: - SwiftUI Commercial UI
+// MARK: - SwiftUI Commercial UI v3.0
 
 struct ShieldPopoverView: View {
     @ObservedObject var vm: ShieldViewModel
@@ -436,7 +610,7 @@ struct ShieldPopoverView: View {
     }
 
     private var cardSurface: Color {
-        isDark ? Color.white.opacity(0.075) : Color.white.opacity(0.78)
+        isDark ? Color.white.opacity(0.075) : Color.white.opacity(0.80)
     }
 
     private var cardBorder: Color {
@@ -462,14 +636,33 @@ struct ShieldPopoverView: View {
         )
     }
 
+    private func purityColor(_ score: Int) -> Color {
+        if score >= 80 { return safeGreen }
+        if score >= 60 { return warnAmber }
+        return dangerRed
+    }
+
+    private func latencyColor(_ ms: Int) -> Color {
+        if ms < 300 { return safeGreen }
+        if ms < 600 { return warnAmber }
+        return dangerRed
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
-            VStack(spacing: 11) {
+            VStack(spacing: 10) {
                 headerCard
-                networkTelemetryRow
-                defenseMatrixGrid
-                protectionToggleBar
-                actionButtonsBar
+                segmentedTabBar
+
+                if vm.selectedTab == .radar {
+                    networkTelemetryRow
+                    defenseMatrixGrid
+                    togglesPanel
+                    actionButtonsBar
+                } else {
+                    purityPanel
+                }
+
                 footerBar
             }
             .padding(14)
@@ -486,7 +679,7 @@ struct ShieldPopoverView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .frame(width: 384)
+        .frame(width: 400)
         .fixedSize(horizontal: false, vertical: true)
         .background(VisualEffectView(material: .popover, blendingMode: .behindWindow))
         .onAppear {
@@ -498,7 +691,7 @@ struct ShieldPopoverView: View {
 
     // 1. Hero Status Card
     private var headerCard: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 11) {
             ZStack {
                 Circle()
                     .fill(accentColor.opacity(vm.pulse ? (isDark ? 0.26 : 0.18) : (isDark ? 0.12 : 0.08)))
@@ -524,45 +717,70 @@ struct ShieldPopoverView: View {
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundColor(.primary)
 
-                    Text(vm.snapshot.isSafe ? "全链路锁死" : "熔断就绪")
-                        .font(.system(size: 10, weight: .semibold))
+                    Text(vm.snapshot.isSafe ? "Rust 内核锁死" : "熔断就绪")
+                        .font(.system(size: 9.5, weight: .semibold))
                         .foregroundColor(accentColor)
-                        .padding(.horizontal, 7)
+                        .padding(.horizontal, 6.5)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(accentColor.opacity(isDark ? 0.22 : 0.12)))
                         .overlay(Capsule().strokeBorder(accentColor.opacity(isDark ? 0.35 : 0.28), lineWidth: 0.6))
                 }
 
                 HStack(spacing: 5) {
-                    Image(systemName: "network")
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundColor(labelColor)
-                    Text(vm.snapshot.expectedIP)
+                    Text(vm.snapshot.expected_ip)
                         .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.primary.opacity(0.84))
-                    if let apiMs = vm.snapshot.apiLatencyMs {
-                        Text(verbatim: "· API \(apiMs)ms")
+                        .foregroundColor(.primary.opacity(0.86))
+                    if let apiMs = vm.snapshot.api_latency.warm_rtt_ms {
+                        let jitterText = vm.snapshot.api_latency.jitter_ms.map { " ±\($0)" } ?? ""
+                        Text(verbatim: "· API \(apiMs)ms\(jitterText)")
                             .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
                             .foregroundColor(latencyColor(apiMs))
                             .lineLimit(1)
-                    } else {
-                        Text("· \(vm.snapshot.proxyColo ?? vm.snapshot.regionFull)")
-                            .font(.system(size: 11, weight: .medium))
+                    } else if let colo = vm.snapshot.claude_edge.colo {
+                        Text("· CF \(colo)")
+                            .font(.system(size: 10.5, weight: .medium))
                             .foregroundColor(labelColor)
-                            .lineLimit(1)
                     }
                 }
             }
 
             Spacer(minLength: 4)
 
-            VStack(alignment: .trailing, spacing: 1) {
-                Text("\(vm.snapshot.defenseScore)/6")
-                    .font(.system(size: 16, weight: .bold, design: .rounded))
-                    .foregroundColor(accentColor)
-                Text("防线激活")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(labelColor)
+            if let p = vm.purity {
+                let pc = purityColor(p.purity_score)
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        vm.selectedTab = vm.selectedTab == .radar ? .purity : .radar
+                    }
+                }) {
+                    VStack(alignment: .trailing, spacing: 1) {
+                        HStack(spacing: 3) {
+                            Text("\(p.purity_score)")
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .foregroundColor(pc)
+                            Text(p.grade)
+                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 4.5)
+                                .padding(.vertical, 1)
+                                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(pc))
+                        }
+                        Text("IP 纯净度")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundColor(labelColor)
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("点击切换 IP 纯净度深度体检面板")
+            } else {
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("\(vm.snapshot.defenseScore)/8")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundColor(accentColor)
+                    Text("防线激活")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(labelColor)
+                }
             }
         }
         .padding(12)
@@ -587,61 +805,95 @@ struct ShieldPopoverView: View {
         .shadow(color: cardShadow, radius: 4, y: 1.5)
     }
 
-    // 2. Dual-Channel Network Telemetry
+    // 2. Segmented Tab Bar
+    private var segmentedTabBar: some View {
+        HStack(spacing: 4) {
+            ForEach(ShieldTab.allCases, id: \.self) { tab in
+                let active = vm.selectedTab == tab
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        vm.selectedTab = tab
+                    }
+                    if tab == .purity && vm.purity == nil {
+                        vm.refreshPurity()
+                    }
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: tab == .radar ? "shield.checkered" : "sparkle.magnifyingglass")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(tab.rawValue)
+                            .font(.system(size: 11.5, weight: .semibold))
+                        if tab == .purity, let p = vm.purity {
+                            Text("\(p.purity_score)分")
+                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                .foregroundColor(active ? .white.opacity(0.95) : purityColor(p.purity_score))
+                                .padding(.horizontal, 4.5)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(active ? Color.white.opacity(0.22) : purityColor(p.purity_score).opacity(0.15)))
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .foregroundColor(active ? .white : .primary.opacity(0.75))
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(active ? AnyShapeStyle(brandGradient) : AnyShapeStyle(Color.clear))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.7))
+    }
+
+    // 3. Dual-Channel + Claude Edge Telemetry
     private var networkTelemetryRow: some View {
         HStack(spacing: 8) {
             tunnelCard(
-                title: "代理 :\(vm.snapshot.proxyPort)",
-                ip: vm.snapshot.proxyIP,
-                latency: vm.snapshot.proxyLatencyMs,
+                title: "Claude 边缘 :\(vm.snapshot.proxy_port)",
+                ip: vm.snapshot.proxy.ip,
+                subtitle: vm.snapshot.claude_edge.colo.map { "CF \($0) · \(vm.snapshot.claude_edge.loc ?? "")" },
+                latency: vm.snapshot.proxy.latency_ms,
                 ok: vm.snapshot.proxyOK,
                 icon: "arrow.triangle.branch"
             )
             tunnelCard(
-                title: "TUN 路由",
-                ip: vm.snapshot.tunIP,
-                latency: vm.snapshot.tunLatencyMs,
+                title: "TUN 默认路由",
+                ip: vm.snapshot.tun.ip,
+                subtitle: vm.snapshot.tun.colo.map { "CF \($0) · \(vm.snapshot.tun.loc ?? "")" },
+                latency: vm.snapshot.tun.latency_ms,
                 ok: vm.snapshot.tunOK,
                 icon: "shield.lefthalf.filled"
             )
         }
     }
 
-    private func latencyColor(_ ms: Int) -> Color {
-        if ms < 350 { return safeGreen }
-        if ms < 700 { return warnAmber }
-        return dangerRed
-    }
-
-    private func tunnelCard(title: String, ip: String, latency: Int?, ok: Bool, icon: String) -> some View {
+    private func tunnelCard(title: String, ip: String, subtitle: String?, latency: Int?, ok: Bool, icon: String) -> some View {
         let dotColor: Color = ok ? safeGreen : dangerRed
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 5) {
-                Circle()
-                    .fill(dotColor)
-                    .frame(width: 7, height: 7)
+                Circle().fill(dotColor).frame(width: 7, height: 7)
                 Text(title)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10.5, weight: .semibold))
                     .foregroundColor(labelColor)
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 4)
+                Spacer(minLength: 3)
                 if let ms = latency {
                     let lc = latencyColor(ms)
                     Text(verbatim: "\(ms)ms")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                         .foregroundColor(lc)
                         .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
+                        .padding(.vertical, 1)
                         .background(Capsule().fill(lc.opacity(isDark ? 0.18 : 0.10)))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
 
             HStack(spacing: 5) {
                 Image(systemName: icon)
-                    .font(.system(size: 10.5, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(dotColor)
                 Text(ip)
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
@@ -649,35 +901,69 @@ struct ShieldPopoverView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
+
+            if let sub = subtitle {
+                Text(sub)
+                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                    .foregroundColor(labelColor)
+                    .lineLimit(1)
+            }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9.5)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8.5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.8))
         .shadow(color: cardShadow, radius: 3, y: 1)
     }
 
-    // 3. 6-Layer Defense Matrix (deterministic 3x2 grid to avoid NSPopover LazyVGrid height clipping)
+    // 4. Hardened Defense Matrix (3x2)
     private var defenseMatrixGrid: some View {
-        VStack(spacing: 8) {
+        let d = vm.snapshot.defenses
+        return VStack(spacing: 7) {
             HStack(spacing: 8) {
-                metricTile(icon: "globe.americas.fill", title: "时区与语言", value: "\(vm.snapshot.regionShort) · en-US", ok: true)
-                metricTile(icon: "lock.shield.fill", title: "OAuth 门禁", value: vm.snapshot.oauthLocked ? "AdsPower-Only" : "未锁定", ok: vm.snapshot.oauthLocked)
+                let tzOK = vm.purity?.timezone_aligned ?? true
+                metricTile(
+                    icon: "globe.americas.fill",
+                    title: "时区与语言",
+                    value: "\(vm.snapshot.region_short) · en-US",
+                    ok: tzOK
+                )
+                metricTile(
+                    icon: "lock.shield.fill",
+                    title: "OAuth 门禁",
+                    value: d.oauth_locked ? "AdsPower-Only" : "未锁定",
+                    ok: d.oauth_locked
+                )
             }
             HStack(spacing: 8) {
-                metricTile(icon: "eye.slash.fill", title: "原版隐藏仓", value: vm.snapshot.originalHidden ? "已隔离防误触" : "暴露在应用栏", ok: vm.snapshot.originalHidden)
-                metricTile(icon: "cube.transparent.fill", title: "macOS 沙盒", value: vm.snapshot.sandboxEnabled ? "Seatbelt 已启" : "未启用", ok: vm.snapshot.sandboxEnabled)
+                metricTile(
+                    icon: "eye.slash.fill",
+                    title: "原版隐藏仓",
+                    value: d.original_hidden ? "已隐藏防误触" : (d.original_app_exposed ? "暴露在应用栏!" : "未安装原版"),
+                    ok: d.original_hidden || !d.original_app_exposed
+                )
+                metricTile(
+                    icon: "cube.transparent.fill",
+                    title: "沙盒与去遥测",
+                    value: (d.sandbox_enabled && d.telemetry_disabled) ? "Seatbelt + 静音" : "部分未启",
+                    ok: d.sandbox_enabled && d.telemetry_disabled
+                )
             }
             HStack(spacing: 8) {
                 metricTile(
                     icon: "desktopcomputer",
                     title: "桌面版进程",
-                    value: vm.snapshot.desktopPID.map { vm.snapshot.desktopProxyBound ? "受保护 · #\($0)" : "未绑定代理 · #\($0)" } ?? "待机未启动",
+                    value: d.desktop_pid.map { vm.snapshot.desktopUnprotected ? "未绑定代理 · #\($0)" : "硬代理 · #\($0)" } ?? "待机未启动",
                     ok: !vm.snapshot.desktopUnprotected,
                     dim: !vm.snapshot.desktopRunning
                 )
-                metricTile(icon: "terminal.fill", title: "Claude Code", value: vm.snapshot.cliReady ? "CLI 防护就绪" : "待初始化", ok: vm.snapshot.cliReady)
+                metricTile(
+                    icon: "terminal.fill",
+                    title: "Claude Code",
+                    value: vm.snapshot.hasUnprotectedCLI ? "发现未保护进程!" : (d.cli_ready ? "Rust 门禁就绪" : "待初始化"),
+                    ok: d.cli_ready && !vm.snapshot.hasUnprotectedCLI
+                )
             }
         }
     }
@@ -690,103 +976,266 @@ struct ShieldPopoverView: View {
                     .fill(tint.opacity(isDark ? 0.16 : 0.11))
                     .frame(width: 26, height: 26)
                 Image(systemName: icon)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(tint)
             }
 
             VStack(alignment: .leading, spacing: 1.5) {
                 Text(title)
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(.system(size: 10, weight: .medium))
                     .foregroundColor(labelColor)
                 Text(value)
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(dim ? labelColor : .primary)
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 9)
-        .padding(.vertical, 7.5)
+        .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.7))
         .shadow(color: cardShadow, radius: 2.5, y: 1)
     }
 
-    // 4. Fail-Closed Auto-Kill Toggle (custom high-contrast switch immune to macOS inactive-popover graying)
-    private var protectionToggleBar: some View {
-        let on = vm.autoKillOnBreach
-        let activeTint = safeGreen
-        return HStack(spacing: 9) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill((on ? activeTint : labelColor).opacity(isDark ? 0.20 : 0.13))
-                    .frame(width: 26, height: 26)
-                Image(systemName: "bolt.shield.fill")
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundColor(on ? activeTint : labelColor)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Text("IP 漂移自动急停")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundColor(.primary)
-                    Text(on ? "已开启" : "已关闭")
-                        .font(.system(size: 9.5, weight: .bold))
-                        .foregroundColor(on ? activeTint : labelColor)
-                        .padding(.horizontal, 5.5)
-                        .padding(.vertical, 1.5)
-                        .background(Capsule().fill((on ? activeTint : labelColor).opacity(isDark ? 0.22 : 0.12)))
-                }
-                Text("巡检发现节点异常时自动终止桌面版防裸连")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(labelColor)
-            }
-            Spacer(minLength: 6)
-
-            Button(action: {
+    // 5. Protection Toggles (Auto-Kill + Login Auto-Start)
+    private var togglesPanel: some View {
+        VStack(spacing: 6) {
+            compactToggleRow(
+                icon: "bolt.shield.fill",
+                title: "IP 漂移 & 唤醒自动急停",
+                subtitle: "断网/切节点/唤醒瞬间自动终止裸连进程",
+                isOn: vm.autoKillOnBreach
+            ) {
                 withAnimation(.spring(response: 0.24, dampingFraction: 0.78)) {
                     vm.autoKillOnBreach.toggle()
                 }
-            }) {
-                ZStack(alignment: on ? .trailing : .leading) {
+            }
+
+            compactToggleRow(
+                icon: "sunrise.fill",
+                title: "开机自启 & 每日巡检守护",
+                subtitle: vm.snapshot.defenses.daily_patrol_enabled ? "登录静默启动雷达 · 每日自动纯净度体检" : "登录静默启动状态栏保护雷达",
+                isOn: vm.loginAutoStart
+            ) {
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.78)) {
+                    vm.setLoginAutoStart(!vm.loginAutoStart)
+                }
+            }
+        }
+    }
+
+    private func compactToggleRow(
+        icon: String,
+        title: String,
+        subtitle: String,
+        isOn: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        let activeTint = safeGreen
+        return HStack(spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill((isOn ? activeTint : labelColor).opacity(isDark ? 0.20 : 0.13))
+                    .frame(width: 24, height: 24)
+                Image(systemName: icon)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundColor(isOn ? activeTint : labelColor)
+            }
+            VStack(alignment: .leading, spacing: 1.5) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text(subtitle)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundColor(labelColor)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 6)
+
+            Button(action: action) {
+                ZStack(alignment: isOn ? .trailing : .leading) {
                     Capsule()
-                        .fill(on ? activeTint : (isDark ? Color.white.opacity(0.18) : Color.black.opacity(0.16)))
-                        .frame(width: 36, height: 20)
-                        .overlay(
-                            Capsule()
-                                .strokeBorder(on ? activeTint.opacity(0.4) : Color.black.opacity(0.06), lineWidth: 0.6)
-                        )
+                        .fill(isOn ? activeTint : (isDark ? Color.white.opacity(0.18) : Color.black.opacity(0.16)))
+                        .frame(width: 34, height: 19)
                     Circle()
                         .fill(Color.white)
-                        .frame(width: 16, height: 16)
+                        .frame(width: 15, height: 15)
                         .shadow(color: Color.black.opacity(0.22), radius: 2, y: 1)
                         .padding(2)
                 }
             }
             .buttonStyle(.plain)
-            .help(on ? "点击关闭 IP 漂移自动急停" : "点击开启 IP 漂移自动急停")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8.5)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(cardSurface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(on ? activeTint.opacity(isDark ? 0.08 : 0.04) : Color.clear)
-                )
-        )
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(on ? activeTint.opacity(isDark ? 0.36 : 0.28) : cardBorder, lineWidth: on ? 0.9 : 0.7)
+                .strokeBorder(isOn ? activeTint.opacity(isDark ? 0.30 : 0.24) : cardBorder, lineWidth: 0.8)
         )
-        .shadow(color: cardShadow, radius: 2.5, y: 1)
     }
 
-    // 5. Primary & Secondary Actions (2-row labeled layout for clarity)
+    // 6. Purity Tab (ip.net.coffee/claude Grade Multi-Source Audit)
+    private var purityPanel: some View {
+        VStack(spacing: 9) {
+            if let p = vm.purity {
+                let pc = purityColor(p.purity_score)
+                // Score Gauge & IP Meta
+                HStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .stroke(pc.opacity(0.18), lineWidth: 5.5)
+                            .frame(width: 56, height: 56)
+                        Circle()
+                            .trim(from: 0, to: CGFloat(max(0, min(100, p.purity_score))) / 100.0)
+                            .stroke(pc, style: StrokeStyle(lineWidth: 5.5, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .frame(width: 56, height: 56)
+                        VStack(spacing: 0) {
+                            Text("\(p.purity_score)")
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .foregroundColor(pc)
+                            Text("\(p.grade)级")
+                                .font(.system(size: 9, weight: .heavy))
+                                .foregroundColor(labelColor)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 5) {
+                            Text(p.ip_type)
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.primary)
+                            Text(p.country_code)
+                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                .foregroundColor(p.region_supported ? safeGreen : dangerRed)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill((p.region_supported ? safeGreen : dangerRed).opacity(0.16)))
+                        }
+                        Text(p.verdict)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundColor(pc)
+                        Text("\(p.asn) · \(p.isp)")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(labelColor)
+                            .lineLimit(1)
+                        Text("\(p.country) · \(p.city)  |  欺诈分: \(p.combined_fraud_score.map(String.init) ?? "-")")
+                            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                            .foregroundColor(labelColor)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(cardSurface))
+                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(pc.opacity(0.32), lineWidth: 0.9))
+
+                // 4-Way Leak Guard Strip
+                HStack(spacing: 6) {
+                    leakPill(title: "Claude边", value: p.claude_edge_match ? (p.claude_colo ?? "一致") : "异常", ok: p.claude_edge_match)
+                    leakPill(title: "DNS", value: p.dns_leak ? "泄露!" : "零泄露", ok: !p.dns_leak)
+                    leakPill(title: "IPv6", value: p.ipv6_leak ? "泄露!" : "已封闭", ok: !p.ipv6_leak)
+                    leakPill(title: "时区", value: p.timezone_aligned ? "已对齐" : "偏移!", ok: p.timezone_aligned)
+                }
+
+                // Itemized Risk Factors
+                VStack(spacing: 5) {
+                    ForEach(p.factors.prefix(6)) { f in
+                        HStack(alignment: .top, spacing: 7) {
+                            Image(systemName: f.severity == "good" ? "checkmark.circle.fill" : (f.severity == "warn" ? "exclamationmark.triangle.fill" : "xmark.octagon.fill"))
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(f.severity == "good" ? safeGreen : (f.severity == "warn" ? warnAmber : dangerRed))
+                                .padding(.top, 1)
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack {
+                                    Text(f.title)
+                                        .font(.system(size: 10.5, weight: .semibold))
+                                        .foregroundColor(.primary)
+                                    Spacer()
+                                    if f.penalty < 0 {
+                                        Text("\(f.penalty)")
+                                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                            .foregroundColor(f.severity == "warn" ? warnAmber : dangerRed)
+                                    }
+                                }
+                                Text(f.detail)
+                                    .font(.system(size: 9.5, weight: .medium))
+                                    .foregroundColor(labelColor)
+                                    .lineLimit(2)
+                            }
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5.5)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(cardSurface))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.6))
+                    }
+                }
+            } else {
+                VStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在执行多源 IP 纯净度与 DNS/IPv6 泄露体检...")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(labelColor)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 28)
+                .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(cardSurface))
+            }
+
+            HStack(spacing: 8) {
+                secondaryActionButton(
+                    icon: "sparkle.magnifyingglass",
+                    title: vm.isCheckingPurity ? "体检中..." : "深度复测纯净度",
+                    isLoading: vm.isCheckingPurity,
+                    help: "调用多源 IP 情报库 + claude.ai 边缘 + DNS/IPv6 泄露全量复测"
+                ) {
+                    vm.refreshPurity()
+                }
+                secondaryActionButton(
+                    icon: "checkmark.shield",
+                    title: vm.isPatrolling ? "巡检中..." : "立即执行巡检",
+                    isLoading: vm.isPatrolling,
+                    help: "执行每日级全链路巡检并自动修复暴露的原版 App"
+                ) {
+                    vm.runPatrolNow()
+                }
+                if vm.snapshot.defenses.original_app_exposed {
+                    secondaryActionButton(
+                        icon: "eye.slash.fill",
+                        title: "隐藏原版",
+                        tint: warnAmber,
+                        help: "立即隐藏暴露在 /Applications 的原版 Claude.app"
+                    ) {
+                        vm.hideOriginalAppNow()
+                    }
+                }
+            }
+        }
+    }
+
+    private func leakPill(title: String, value: String, ok: Bool) -> some View {
+        let color = ok ? safeGreen : dangerRed
+        return VStack(spacing: 2) {
+            Text(title)
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundColor(labelColor)
+            Text(value)
+                .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                .foregroundColor(color)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(color.opacity(isDark ? 0.13 : 0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(color.opacity(0.28), lineWidth: 0.7))
+    }
+
+    // 7. Primary & Secondary Actions
     private var actionButtonsBar: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 7) {
             Button(action: { vm.launchClaudeSafe() }) {
                 HStack(spacing: 6) {
                     Image(systemName: vm.snapshot.desktopRunning ? "macwindow.on.rectangle" : "play.fill")
@@ -795,7 +1244,7 @@ struct ShieldPopoverView: View {
                         .font(.system(size: 12.5, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 9.5)
+                .padding(.vertical, 9)
                 .foregroundColor(.white)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -809,20 +1258,29 @@ struct ShieldPopoverView: View {
             }
             .buttonStyle(.plain)
 
-            HStack(spacing: 8) {
+            HStack(spacing: 7) {
                 secondaryActionButton(
                     icon: "arrow.clockwise",
-                    title: vm.isRefreshing ? "检测中" : "重新测速",
+                    title: vm.isRefreshing ? "测速中" : "重新测速",
                     isLoading: vm.isRefreshing,
-                    help: "立即重新校验双通道 IP 与 Anthropic API 延迟"
+                    help: "使用 Rust 内核重新测量三点出口 IP 与 Anthropic API 真实 1-RTT"
                 ) {
                     vm.refresh()
                 }
 
                 secondaryActionButton(
+                    icon: "checkmark.shield",
+                    title: vm.isPatrolling ? "巡检中" : "立即巡检",
+                    isLoading: vm.isPatrolling,
+                    help: "执行全链路安全与纯净度巡检"
+                ) {
+                    vm.runPatrolNow()
+                }
+
+                secondaryActionButton(
                     icon: "camera.viewfinder",
                     title: "截图诊断",
-                    help: "生成高清状态诊断截图并复制到剪贴板，可直接 ⌘V 粘贴分享"
+                    help: "生成 2x Retina 诊断卡片并复制到剪贴板"
                 ) {
                     copySnapshotImage()
                 }
@@ -830,7 +1288,7 @@ struct ShieldPopoverView: View {
                 if vm.snapshot.desktopRunning {
                     secondaryActionButton(
                         icon: "stop.circle.fill",
-                        title: "紧急急停",
+                        title: "急停",
                         tint: dangerRed,
                         isDestructive: true,
                         help: "立即强制终止 Claude 桌面版进程"
@@ -852,24 +1310,24 @@ struct ShieldPopoverView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 if isLoading {
                     ProgressView()
                         .controlSize(.mini)
-                        .scaleEffect(0.85)
-                        .frame(width: 12, height: 12)
+                        .scaleEffect(0.82)
+                        .frame(width: 11, height: 11)
                 } else {
                     Image(systemName: icon)
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(tint)
                 }
                 Text(title)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10.5, weight: .semibold))
                     .foregroundColor(isDestructive ? dangerRed : .primary)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 7.5)
+            .padding(.vertical, 7)
             .background(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(isDestructive ? dangerRed.opacity(isDark ? 0.16 : 0.09) : cardSurface)
@@ -885,41 +1343,48 @@ struct ShieldPopoverView: View {
         .help(help)
     }
 
-    // 6. Footer
+    // 8. Footer
     private var footerBar: some View {
         HStack {
-            Text("Claude Shield v2.2 · 巡检 \(vm.snapshot.checkedAt)")
-                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+            Text("Claude Shield v3.0 Rust · 巡检 \(vm.snapshot.checked_at)")
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundColor(labelColor)
             Spacer()
             Button("退出监控") { vm.quitMonitorOnly() }
                 .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 10.5, weight: .semibold))
                 .foregroundColor(labelColor)
-                .help("仅关闭状态栏雷达，已启动的代理硬绑定、CLI 门禁与沙盒防护持续生效")
+                .help("仅关闭状态栏雷达，Rust CLI 门禁、每日巡检与沙盒防护持续生效")
         }
         .padding(.top, 1)
     }
 
-    // Exportable 2x Retina diagnostic card for clipboard screenshot
+    // Exportable 2x Retina Diagnostic Card
     private var diagnosticShareCard: some View {
-        VStack(spacing: 11) {
+        VStack(spacing: 10) {
             headerCard
             networkTelemetryRow
+            if let p = vm.purity {
+                HStack(spacing: 6) {
+                    leakPill(title: "纯净度", value: "\(p.purity_score) (\(p.grade))", ok: p.purity_score >= 78)
+                    leakPill(title: "IP属性", value: p.ip_type, ok: !p.is_hosting && !p.is_proxy_or_vpn)
+                    leakPill(title: "DNS", value: p.dns_leak ? "泄露" : "安全", ok: !p.dns_leak)
+                    leakPill(title: "IPv6", value: p.ipv6_leak ? "泄露" : "封闭", ok: !p.ipv6_leak)
+                }
+            }
             defenseMatrixGrid
             HStack {
-                Text("Claude Shield v2.2 · 巡检 \(vm.snapshot.checkedAt)")
-                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                Text("Claude Shield v3.0 Rust · \(vm.snapshot.checked_at)")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundColor(labelColor)
                 Spacer()
-                Text(vm.autoKillOnBreach ? "Fail-Closed 已启" : "Fail-Closed 未启")
-                    .font(.system(size: 10, weight: .semibold))
+                Text(vm.autoKillOnBreach ? "Fail-Closed + 唤醒防护已启" : "Fail-Closed 未启")
+                    .font(.system(size: 9.5, weight: .semibold))
                     .foregroundColor(vm.autoKillOnBreach ? safeGreen : labelColor)
             }
-            .padding(.top, 1)
         }
         .padding(16)
-        .frame(width: 392)
+        .frame(width: 404)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(
@@ -932,10 +1397,7 @@ struct ShieldPopoverView: View {
                     )
                 )
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(cardBorder, lineWidth: 1)
-        )
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
         .environment(\.colorScheme, colorScheme)
     }
 
@@ -987,7 +1449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let radarOnly = CommandLine.arguments.contains("--radar-only")
 
-        // Single-instance guard: if Claude Shield is already running, ask it to launch/focus Claude Desktop and exit
+        // Single-instance guard
         if let bundleID = Bundle.main.bundleIdentifier {
             let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
                 .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
@@ -1027,24 +1489,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.popover = popover
         updatePopoverSize()
 
-        viewModel.onStatusChange = { [weak self] snap in
+        viewModel.onStatusChange = { [weak self] snap, purity in
             guard let self = self, let button = self.statusItem.button else { return }
             if snap.isSafe {
-                let bestMs = snap.apiLatencyMs ?? snap.proxyLatencyMs
+                let bestMs = snap.api_latency.warm_rtt_ms ?? snap.proxy.latency_ms
                 let msText = bestMs.map { " \($0)ms" } ?? ""
-                button.title = "🟢 \(snap.regionShort)\(msText)"
+                let gradeText = purity.map { " · \($0.grade)" } ?? ""
+                button.title = "🟢 \(snap.region_short)\(msText)\(gradeText)"
             } else {
-                button.title = snap.desktopUnprotected ? "🔴 进程未受保护!" : "🔴 IP 异常!"
+                if snap.desktopUnprotected || snap.hasUnprotectedCLI {
+                    button.title = "🔴 进程未受保护!"
+                } else {
+                    button.title = "🔴 IP 异常!"
+                }
             }
             if self.popover.isShown {
                 self.updatePopoverSize()
             }
         }
 
-        viewModel.startPolling()
+        viewModel.startMonitoring()
         hasCompletedInitialLaunch = true
 
-        // Unified Launcher behavior: clicking Claude Shield.app from Launchpad/Spotlight launches/focuses Claude Desktop
         if !radarOnly {
             viewModel.launchClaudeSafe()
         }
@@ -1065,7 +1531,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hostingController.view.layoutSubtreeIfNeeded()
         let fitting = hostingController.view.fittingSize
         if fitting.width > 0 && fitting.height > 0 {
-            popover.contentSize = NSSize(width: 384, height: ceil(fitting.height))
+            popover.contentSize = NSSize(width: 400, height: ceil(fitting.height))
         }
     }
 

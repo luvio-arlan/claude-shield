@@ -1,0 +1,23 @@
+[package]
+name = "claude-shield-core"
+version = "3.0.0"
+edition = "2021"
+description = "High-performance native Rust anti-ban gatekeeper, latency calibrator, IP purity engine & patrol daemon for Claude Shield"
+
+[[bin]]
+name = "claude-shield-core"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "process"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2", "socks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

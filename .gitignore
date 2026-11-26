@@ -1,0 +1,8 @@
+# Rust build artifacts
+core/target/
+**/target/
+
+# macOS clutter
+.DS_Store
+*.swp
+*.swo
