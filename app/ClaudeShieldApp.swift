@@ -749,9 +749,9 @@ struct ShieldPopoverView: View {
         .shadow(color: cardShadow, radius: 2.5, y: 1)
     }
 
-    // 5. Primary & Secondary Actions
+    // 5. Primary & Secondary Actions (2-row labeled layout for clarity)
     private var actionButtonsBar: some View {
-        HStack(spacing: 8) {
+        VStack(spacing: 8) {
             Button(action: { vm.launchClaudeSafe() }) {
                 HStack(spacing: 6) {
                     Image(systemName: vm.snapshot.desktopRunning ? "macwindow.on.rectangle" : "play.fill")
@@ -760,7 +760,7 @@ struct ShieldPopoverView: View {
                         .font(.system(size: 12.5, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
+                .padding(.vertical, 9.5)
                 .foregroundColor(.white)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -774,33 +774,79 @@ struct ShieldPopoverView: View {
             }
             .buttonStyle(.plain)
 
-            iconActionButton(icon: vm.isRefreshing ? "hourglass" : "arrow.clockwise", help: "立即重新测速检测") {
-                vm.refresh()
-            }
+            HStack(spacing: 8) {
+                secondaryActionButton(
+                    icon: "arrow.clockwise",
+                    title: vm.isRefreshing ? "检测中" : "重新测速",
+                    isLoading: vm.isRefreshing,
+                    help: "立即重新校验双通道 IP 与 Anthropic API 延迟"
+                ) {
+                    vm.refresh()
+                }
 
-            iconActionButton(icon: "doc.on.doc", help: "复制诊断报告") {
-                vm.copyDiagnostics()
-            }
+                secondaryActionButton(
+                    icon: "doc.on.doc",
+                    title: "复制诊断",
+                    help: "复制完整环境与网络诊断报告到剪贴板"
+                ) {
+                    vm.copyDiagnostics()
+                }
 
-            if vm.snapshot.desktopRunning {
-                iconActionButton(icon: "stop.circle.fill", help: "紧急停止 Claude 桌面版", tint: dangerRed) {
-                    vm.emergencyKillClaude()
+                if vm.snapshot.desktopRunning {
+                    secondaryActionButton(
+                        icon: "stop.circle.fill",
+                        title: "紧急急停",
+                        tint: dangerRed,
+                        isDestructive: true,
+                        help: "立即强制终止 Claude 桌面版进程"
+                    ) {
+                        vm.emergencyKillClaude()
+                    }
                 }
             }
         }
     }
 
-    private func iconActionButton(icon: String, help: String, tint: Color = .primary, action: @escaping () -> Void) -> some View {
+    private func secondaryActionButton(
+        icon: String,
+        title: String,
+        tint: Color = .primary,
+        isLoading: Bool = false,
+        isDestructive: Bool = false,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(tint)
-                .frame(width: 36, height: 34)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.8))
-                .shadow(color: cardShadow, radius: 2.5, y: 1)
+            HStack(spacing: 5) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.85)
+                        .frame(width: 12, height: 12)
+                } else {
+                    Image(systemName: icon)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(tint)
+                }
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(isDestructive ? dangerRed : .primary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7.5)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(isDestructive ? dangerRed.opacity(isDark ? 0.16 : 0.09) : cardSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(isDestructive ? dangerRed.opacity(isDark ? 0.35 : 0.25) : cardBorder, lineWidth: 0.8)
+            )
+            .shadow(color: cardShadow, radius: 2, y: 1)
         }
         .buttonStyle(.plain)
+        .disabled(isLoading)
         .help(help)
     }
 
