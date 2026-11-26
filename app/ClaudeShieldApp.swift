@@ -2302,32 +2302,22 @@ struct ShieldPopoverView: View {
 
     // 8. Footer
     private var footerBar: some View {
-        HStack(spacing: 8) {
-            Text("v3.1 Rust · \(vm.snapshot.checked_at)")
+        HStack {
+            Text("Claude Shield v3.1 Rust · 更新 \(vm.snapshot.checked_at)")
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundColor(labelColor)
             Spacer()
-            Button("防护设置") { vm.openSetupWizard(isFirstRun: false) }
-                .buttonStyle(SnappyButtonStyle(scale: 0.95))
-                .font(.system(size: 10.5, weight: .semibold))
+            Button(action: { vm.openSetupWizard(isFirstRun: false) }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("防护设置")
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
                 .foregroundColor(labelColor)
-                .help("修改白名单 IP、代理端口、目标时区，或重新一键部署本地防线")
-            Text("·")
-                .font(.system(size: 10))
-                .foregroundColor(labelColor.opacity(0.5))
-            Button("卸载还原") { vm.confirmAndUninstall() }
-                .buttonStyle(SnappyButtonStyle(scale: 0.95))
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundColor(dangerRed.opacity(0.85))
-                .help("一键卸载 Claude Shield 并完整还原原版 Claude.app 与所有本地配置")
-            Text("·")
-                .font(.system(size: 10))
-                .foregroundColor(labelColor.opacity(0.5))
-            Button("退出") { vm.quitMonitorOnly() }
-                .buttonStyle(SnappyButtonStyle(scale: 0.95))
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundColor(labelColor)
-                .help("仅关闭状态栏雷达，Rust CLI 门禁、每日自动体检与沙盒防护持续生效")
+            }
+            .buttonStyle(SnappyButtonStyle(scale: 0.95))
+            .help("管理出口 IP 白名单、时区对齐、本地防护策略与卸载还原")
         }
         .padding(.top, 1)
     }
@@ -3053,6 +3043,38 @@ private final class SetupWizardState: ObservableObject {
     }
 }
 
+private struct StyledSettingsInput: View {
+    let placeholder: String
+    @Binding var text: String
+    let isDark: Bool
+    var isMonospaced: Bool = true
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        let accent = Color(red: 0.85, green: 0.43, blue: 0.27)
+        TextField(placeholder, text: $text)
+            .textFieldStyle(.plain)
+            .focused($isFocused)
+            .font(.system(size: 13.5, weight: .medium, design: isMonospaced ? .monospaced : .default))
+            .foregroundColor(.primary)
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isDark ? Color.black.opacity(0.28) : Color.white.opacity(0.92))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        isFocused ? accent.opacity(0.85) : (isDark ? Color.white.opacity(0.13) : Color.black.opacity(0.11)),
+                        lineWidth: isFocused ? 1.5 : 0.9
+                    )
+            )
+            .shadow(color: isFocused ? accent.opacity(0.16) : .clear, radius: 4, y: 0)
+            .animation(.easeOut(duration: 0.14), value: isFocused)
+    }
+}
+
 private struct SetupWizardView: View {
     @ObservedObject var state: SetupWizardState
     let onClose: () -> Void
@@ -3061,31 +3083,39 @@ private struct SetupWizardView: View {
     let onApplied: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var closeHover = LocalState(false)
+    @StateObject private var detectHover = LocalState(false)
+    @StateObject private var uninstallHover = LocalState(false)
+    @StateObject private var saveHover = LocalState(false)
 
     private var isDark: Bool { colorScheme == .dark }
+    private var brandTerracotta: Color { Color(red: 0.85, green: 0.43, blue: 0.27) }
     private var safeGreen: Color {
-        isDark ? Color(red: 0.22, green: 0.84, blue: 0.60) : Color(red: 0.04, green: 0.54, blue: 0.36)
+        isDark ? Color(red: 0.22, green: 0.84, blue: 0.60) : Color(red: 0.06, green: 0.56, blue: 0.37)
     }
     private var dangerRed: Color {
-        isDark ? Color(red: 0.98, green: 0.40, blue: 0.42) : Color(red: 0.84, green: 0.16, blue: 0.16)
+        isDark ? Color(red: 0.98, green: 0.40, blue: 0.42) : Color(red: 0.84, green: 0.18, blue: 0.18)
     }
     private var warnAmber: Color {
         isDark ? Color(red: 0.98, green: 0.72, blue: 0.24) : Color(red: 0.78, green: 0.42, blue: 0.04)
     }
     private var cardSurface: Color {
-        isDark ? Color.white.opacity(0.065) : Color.white.opacity(0.78)
+        isDark ? Color.white.opacity(0.06) : Color.white.opacity(0.84)
     }
     private var cardBorder: Color {
-        isDark ? Color.white.opacity(0.11) : Color.black.opacity(0.08)
+        isDark ? Color.white.opacity(0.11) : Color.black.opacity(0.075)
+    }
+    private var dividerColor: Color {
+        isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.065)
     }
     private var labelColor: Color {
-        isDark ? Color.white.opacity(0.64) : Color.black.opacity(0.58)
+        isDark ? Color.white.opacity(0.60) : Color.black.opacity(0.55)
     }
     private var brandGradient: LinearGradient {
         LinearGradient(
             colors: [
-                Color(red: 0.86, green: 0.43, blue: 0.27),
-                Color(red: 0.75, green: 0.31, blue: 0.18)
+                Color(red: 0.87, green: 0.44, blue: 0.28),
+                Color(red: 0.74, green: 0.30, blue: 0.17)
             ],
             startPoint: .top,
             endPoint: .bottom
@@ -3097,25 +3127,30 @@ private struct SetupWizardView: View {
         ("纽约", "America/New_York"),
         ("东京", "Asia/Tokyo"),
         ("新加坡", "Asia/Singapore"),
-        ("伦敦", "Europe/London")
+        ("伦敦", "Europe/London"),
+        ("法兰克福", "Europe/Berlin")
+    ]
+
+    private let builtinTags: [String] = [
+        "CLI 门禁", "OAuth 拦截", "Seatbelt 沙盒", "零遥测", "IPv4-First"
     ]
 
     var body: some View {
         ZStack(alignment: .top) {
-            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
+            VisualEffectView(material: .windowBackground, blendingMode: .behindWindow)
 
             LinearGradient(
                 colors: [
-                    Color(red: 0.86, green: 0.43, blue: 0.27).opacity(isDark ? 0.18 : 0.11),
+                    brandTerracotta.opacity(isDark ? 0.16 : 0.09),
                     Color.clear
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 110)
+            .frame(height: 140)
             .allowsHitTesting(false)
 
-            VStack(spacing: 12) {
+            VStack(spacing: 18) {
                 headerRow
 
                 if let report = state.setupReport {
@@ -3124,33 +3159,35 @@ private struct SetupWizardView: View {
                     networkConfigCard
                     optionsCard
                     if let err = state.errorMessage {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 8) {
                             Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 11))
+                                .font(.system(size: 13))
                                 .foregroundColor(warnAmber)
                             Text(err)
-                                .font(.system(size: 10.5, weight: .medium))
-                                .foregroundColor(.primary.opacity(0.88))
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.primary.opacity(0.9))
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
                         }
-                        .padding(9)
-                        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(warnAmber.opacity(isDark ? 0.14 : 0.10)))
-                        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(warnAmber.opacity(0.32), lineWidth: 0.7))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 11)
+                        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(warnAmber.opacity(isDark ? 0.15 : 0.10)))
+                        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(warnAmber.opacity(0.32), lineWidth: 0.8))
                     }
                     bottomActionRow
                 }
             }
-            .padding(18)
+            .padding(.horizontal, 26)
+            .padding(.vertical, 24)
         }
-        .frame(width: 452)
+        .frame(width: 580)
         .fixedSize(horizontal: false, vertical: true)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.10), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.10), lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(isDark ? 0.55 : 0.22), radius: 24, y: 12)
+        .shadow(color: Color.black.opacity(isDark ? 0.55 : 0.20), radius: 30, y: 14)
         .onAppear {
             if state.isFirstRun || state.expectedIP.isEmpty {
                 state.runAutoDetect()
@@ -3159,297 +3196,397 @@ private struct SetupWizardView: View {
     }
 
     private var headerRow: some View {
-        HStack(alignment: .center, spacing: 11) {
+        HStack(alignment: .center, spacing: 14) {
             ShieldStatusBadge(
                 isSafe: state.setupReport != nil || (state.detectedInfo?.proxy_reachable ?? true),
-                accentColor: state.setupReport != nil ? safeGreen : Color(red: 0.85, green: 0.43, blue: 0.27),
+                accentColor: state.setupReport != nil ? safeGreen : brandTerracotta,
                 isDark: isDark
             )
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(state.isFirstRun ? "欢迎使用 Claude Shield" : "Claude Shield 防护设置")
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(state.isFirstRun ? "欢迎使用 Claude Shield" : "防护设置")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
                         .foregroundColor(.primary)
                     Text("v3.1")
-                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(Color(red: 0.85, green: 0.43, blue: 0.27))
-                        .padding(.horizontal, 5.5)
-                        .padding(.vertical, 1.5)
-                        .background(Capsule().fill(Color(red: 0.85, green: 0.43, blue: 0.27).opacity(isDark ? 0.22 : 0.13)))
+                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(brandTerracotta)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Capsule().fill(brandTerracotta.opacity(isDark ? 0.22 : 0.12)))
                 }
-                Text("下载即用 · 自动完成本地 IP 门禁、时区/语言锁定、沙盒去遥测与原版隐藏")
-                    .font(.system(size: 10.5, weight: .medium))
+                Text(state.isFirstRun ? "自动识别您的代理节点，一键完成全套防封配置" : "管理出口 IP 白名单、时区对齐与本地防护策略")
+                    .font(.system(size: 12.5, weight: .regular))
                     .foregroundColor(labelColor)
             }
 
-            Spacer(minLength: 4)
+            Spacer(minLength: 8)
 
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10.5, weight: .bold))
-                    .foregroundColor(labelColor)
-                    .frame(width: 24, height: 24)
-                    .background(Circle().fill(cardSurface))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(closeHover.value ? .primary : labelColor)
+                    .frame(width: 30, height: 30)
+                    .background(
+                        Circle().fill(
+                            closeHover.value
+                                ? (isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.08))
+                                : (isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.045))
+                        )
+                    )
             }
             .buttonStyle(SnappyButtonStyle())
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.12)) { closeHover.value = hovering }
+            }
             .help("关闭窗口")
         }
     }
 
     private var networkConfigCard: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Label("出口 IP、代理端口与时区对齐", systemImage: "network.badge.shield.half.filled")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundColor(.primary)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center) {
+                HStack(spacing: 7) {
+                    Image(systemName: "network.badge.shield.half.filled")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(brandTerracotta)
+                    Text("网络与地区")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+                }
+
                 Spacer()
+
                 Button(action: { state.runAutoDetect() }) {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 5) {
                         if state.isDetecting {
-                            ProgressView().controlSize(.mini).scaleEffect(0.75)
+                            ProgressView().controlSize(.mini).scaleEffect(0.8)
                         } else {
                             Image(systemName: "wand.and.stars")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.system(size: 11.5, weight: .semibold))
                         }
-                        Text(state.isDetecting ? "探测中..." : "自动识别当前节点")
-                            .font(.system(size: 10, weight: .semibold))
+                        Text(state.isDetecting ? "正在探测..." : "自动识别节点")
+                            .font(.system(size: 12, weight: .semibold))
                     }
-                    .foregroundColor(Color(red: 0.85, green: 0.43, blue: 0.27))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3.5)
-                    .background(Capsule().fill(Color(red: 0.85, green: 0.43, blue: 0.27).opacity(isDark ? 0.18 : 0.11)))
+                    .foregroundColor(brandTerracotta)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule().fill(
+                            brandTerracotta.opacity(detectHover.value ? (isDark ? 0.26 : 0.17) : (isDark ? 0.16 : 0.10))
+                        )
+                    )
                 }
                 .buttonStyle(SnappyButtonStyle())
+                .onHover { h in withAnimation(.easeOut(duration: 0.12)) { detectHover.value = h } }
                 .disabled(state.isDetecting)
             }
 
             if let info = state.detectedInfo, !info.exit_ip.isEmpty {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Circle()
                         .fill(info.tun_matches ? safeGreen : warnAmber)
-                        .frame(width: 6.5, height: 6.5)
-                    Text("已识别：\(info.country_code.isEmpty ? "US" : info.country_code)\(info.city.isEmpty ? "" : " · \(info.city)")\(info.isp.isEmpty ? "" : " · \(info.isp)")")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(labelColor)
+                        .frame(width: 7.5, height: 7.5)
+                    Text("\(info.country_code.isEmpty ? "US" : info.country_code)\(info.city.isEmpty ? "" : " · \(info.city)")\(info.isp.isEmpty ? "" : " · \(info.isp)")")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.primary.opacity(0.82))
                         .lineLimit(1)
                     Spacer()
                     Text(info.tun_matches ? "Proxy & TUN 一致" : "请确认已开启 TUN")
-                        .font(.system(size: 9.5, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(info.tun_matches ? safeGreen : warnAmber)
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill((info.tun_matches ? safeGreen : warnAmber).opacity(isDark ? 0.12 : 0.08))
+                )
             }
 
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("白名单专属 IP")
-                        .font(.system(size: 10, weight: .semibold))
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("白名单出口 IP")
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundColor(labelColor)
-                    TextField("例如 45.77.12.34", text: $state.expectedIP)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11.5, design: .monospaced))
+                    StyledSettingsInput(placeholder: "例如 45.77.12.34", text: $state.expectedIP, isDark: isDark)
                 }
 
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text("本地代理端口")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundColor(labelColor)
-                    TextField("7897", text: $state.proxyPortText)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11.5, design: .monospaced))
-                        .frame(width: 92)
+                    StyledSettingsInput(placeholder: "7897", text: $state.proxyPortText, isDark: isDark)
+                        .frame(width: 124)
                 }
             }
 
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("目标时区 (TZ) · 自动锁定语言 en_US.UTF-8")
-                        .font(.system(size: 10, weight: .semibold))
+                    Text("目标时区 (TZ)")
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundColor(labelColor)
                     Spacer()
+                    Text("语言自动锁定 en_US.UTF-8")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(safeGreen)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2.5)
+                        .background(Capsule().fill(safeGreen.opacity(isDark ? 0.14 : 0.09)))
                 }
-                TextField("America/Los_Angeles", text: $state.targetTZ)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11.5, design: .monospaced))
 
-                HStack(spacing: 5) {
+                StyledSettingsInput(placeholder: "America/Los_Angeles", text: $state.targetTZ, isDark: isDark)
+
+                HStack(spacing: 7) {
                     ForEach(tzPresets, id: \.1) { label, tz in
                         let selected = state.targetTZ == tz
                         Button(label) {
-                            state.targetTZ = tz
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                state.targetTZ = tz
+                            }
                         }
                         .buttonStyle(SnappyButtonStyle(scale: 0.96))
-                        .font(.system(size: 9.5, weight: .semibold))
-                        .foregroundColor(selected ? .white : labelColor)
-                        .padding(.horizontal, 7.5)
-                        .padding(.vertical, 3)
+                        .font(.system(size: 11.5, weight: selected ? .semibold : .medium))
+                        .foregroundColor(selected ? .white : .primary.opacity(0.76))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5)
                         .background(
-                            Capsule().fill(selected ? AnyShapeStyle(brandGradient) : AnyShapeStyle(cardSurface))
+                            Capsule().fill(
+                                selected
+                                    ? AnyShapeStyle(brandGradient)
+                                    : AnyShapeStyle(isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.045))
+                            )
                         )
-                        .overlay(Capsule().strokeBorder(selected ? Color.clear : cardBorder, lineWidth: 0.6))
                     }
-                    Spacer()
+                    Spacer(minLength: 0)
                 }
+                .padding(.top, 2)
             }
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(cardSurface))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.8))
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(cardSurface))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.85))
+    }
+
+    private func policyRow(
+        icon: String,
+        title: String,
+        subtitle: String,
+        isOn: Binding<Bool>
+    ) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8.5, style: .continuous)
+                    .fill(brandTerracotta.opacity(isDark ? 0.16 : 0.10))
+                    .frame(width: 32, height: 32)
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(brandTerracotta)
+            }
+
+            VStack(alignment: .leading, spacing: 2.5) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text(subtitle)
+                    .font(.system(size: 11.5, weight: .regular))
+                    .foregroundColor(labelColor)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 12)
+
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(brandTerracotta)
+                .controlSize(.regular)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 13)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var optionsCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("自动为您部署的本地防线")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.primary)
+        VStack(spacing: 0) {
+            policyRow(
+                icon: "eye.slash.fill",
+                title: "隐藏原版 Claude.app 图标",
+                subtitle: "移入隔离仓防误点裸连，卸载时一键无损还原",
+                isOn: $state.hideOriginal
+            )
 
-            Toggle(isOn: $state.hideOriginal) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("隐藏原版 Claude.app 图标并移入隔离仓")
-                        .font(.system(size: 11, weight: .semibold))
-                    Text("防止手滑裸连，卸载时一键无损还原至 /Applications")
-                        .font(.system(size: 9.5))
-                        .foregroundColor(labelColor)
+            Divider().overlay(dividerColor).padding(.leading, 62)
+
+            policyRow(
+                icon: "bolt.shield.fill",
+                title: "开机自启状态栏雷达",
+                subtitle: "登录 macOS 后自动守护休眠唤醒与网络切换",
+                isOn: $state.enableAutostart
+            )
+
+            Divider().overlay(dividerColor).padding(.leading, 62)
+
+            policyRow(
+                icon: "sparkle.magnifyingglass",
+                title: "每日 09:30 自动纯净度巡检",
+                subtitle: "静默检测 DNS/IPv6 泄露，异常时主动提醒",
+                isOn: $state.enableDailyPatrol
+            )
+
+            Divider().overlay(dividerColor)
+
+            HStack(spacing: 8) {
+                Text("内置防线")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(labelColor)
+                ForEach(builtinTags, id: \.self) { tag in
+                    HStack(spacing: 3.5) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(safeGreen)
+                        Text(tag)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.primary.opacity(0.8))
+                    }
+                    .padding(.horizontal, 7.5)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule().fill(safeGreen.opacity(isDark ? 0.12 : 0.08))
+                    )
                 }
+                Spacer(minLength: 0)
             }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-
-            Toggle(isOn: $state.enableAutostart) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("开启开机自启状态栏雷达")
-                        .font(.system(size: 11, weight: .semibold))
-                    Text("登录 macOS 后自动守护睡眠唤醒与网络切换")
-                        .font(.system(size: 9.5))
-                        .foregroundColor(labelColor)
-                }
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-
-            Toggle(isOn: $state.enableDailyPatrol) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("开启每日 09:30 自动 IP 纯净度巡检")
-                        .font(.system(size: 11, weight: .semibold))
-                    Text("静默检测 DNS/IPv6 泄露与原版回弹，异常时推送提醒")
-                        .font(.system(size: 9.5))
-                        .foregroundColor(labelColor)
-                }
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-
-            Text("同时自动完成：CLI 硬代理门禁、OAuth 弹窗拦截、Seatbelt 沙盒、全量去遥测与 IPv4-First")
-                .font(.system(size: 9.5, weight: .medium))
-                .foregroundColor(safeGreen)
-                .padding(.top, 2)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 11)
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(cardSurface))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.8))
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(cardSurface))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.85))
     }
 
     private var bottomActionRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 12) {
             if !state.isFirstRun {
                 Button(action: onUninstall) {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 6) {
                         Image(systemName: "arrow.uturn.backward.circle.fill")
-                            .font(.system(size: 11))
-                        Text("一键卸载还原")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(.system(size: 13))
+                        Text("卸载并还原")
+                            .font(.system(size: 13, weight: .semibold))
                     }
                     .foregroundColor(dangerRed)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8.5)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(dangerRed.opacity(isDark ? 0.16 : 0.09)))
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(dangerRed.opacity(0.32), lineWidth: 0.8))
+                    .padding(.horizontal, 16)
+                    .frame(height: 42)
+                    .background(
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .fill(dangerRed.opacity(uninstallHover.value ? (isDark ? 0.22 : 0.14) : (isDark ? 0.13 : 0.08)))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .strokeBorder(dangerRed.opacity(uninstallHover.value ? 0.45 : 0.26), lineWidth: 0.9)
+                    )
                 }
                 .buttonStyle(SnappyButtonStyle())
+                .onHover { h in withAnimation(.easeOut(duration: 0.12)) { uninstallHover.value = h } }
             }
 
             Button(action: {
                 state.applySetup(onSuccess: onApplied)
             }) {
-                HStack(spacing: 6) {
+                HStack(spacing: 7) {
                     if state.isApplying {
-                        ProgressView().controlSize(.mini).scaleEffect(0.85)
+                        ProgressView().controlSize(.small).scaleEffect(0.85)
                     } else {
                         Image(systemName: "checkmark.shield.fill")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 14, weight: .semibold))
                     }
                     Text(state.isApplying ? "正在部署防线..." : (state.isFirstRun ? "一键部署全套防封防护" : "保存并应用防护"))
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
+                .frame(height: 42)
                 .foregroundColor(.white)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(brandGradient))
-                .shadow(color: Color(red: 0.75, green: 0.31, blue: 0.18).opacity(0.28), radius: 5, y: 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(brandGradient)
+                        .brightness(saveHover.value ? 0.04 : 0)
+                )
+                .shadow(color: Color(red: 0.75, green: 0.31, blue: 0.18).opacity(saveHover.value ? 0.36 : 0.26), radius: 8, y: 3)
             }
-            .buttonStyle(SnappyButtonStyle(scale: 0.98))
+            .buttonStyle(SnappyButtonStyle(scale: 0.985))
+            .onHover { h in withAnimation(.easeOut(duration: 0.12)) { saveHover.value = h } }
             .disabled(state.isApplying)
         }
+        .padding(.top, 2)
     }
 
     private func completionCard(_ report: SetupReportModel) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 7) {
-                Image(systemName: "checkmark.seal.fill")
-                    .font(.system(size: 16))
-                    .foregroundColor(safeGreen)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("全套本地防封防线已部署完成")
-                        .font(.system(size: 13, weight: .bold))
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(safeGreen.opacity(isDark ? 0.18 : 0.12))
+                        .frame(width: 42, height: 42)
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 22))
+                        .foregroundColor(safeGreen)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("全套本地防封防线已就绪")
+                        .font(.system(size: 15.5, weight: .bold))
                         .foregroundColor(.primary)
-                    Text("IP \(report.expected_ip) · :\(report.proxy_port) · \(report.target_tz) · en_US.UTF-8")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    Text("\(report.expected_ip) · 端口 \(report.proxy_port) · \(report.target_tz) · en_US.UTF-8")
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
                         .foregroundColor(labelColor)
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4.5) {
+            VStack(alignment: .leading, spacing: 8) {
                 ForEach(report.actions, id: \.self) { item in
-                    HStack(alignment: .top, spacing: 6) {
+                    HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 10.5))
+                            .font(.system(size: 12.5))
                             .foregroundColor(safeGreen)
                             .padding(.top, 1.5)
                         Text(item)
-                            .font(.system(size: 10.5, weight: .medium))
+                            .font(.system(size: 12.5, weight: .medium))
                             .foregroundColor(.primary.opacity(0.9))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
-            .padding(10)
+            .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.7))
+            .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(cardSurface))
+            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.8))
 
-            HStack(spacing: 8) {
+            HStack(spacing: 12) {
                 Button("完成") { onClose() }
                     .buttonStyle(SnappyButtonStyle())
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8.5)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.8))
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundColor(.primary)
+                    .padding(.horizontal, 24)
+                    .frame(height: 42)
+                    .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(cardSurface))
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.9))
 
                 Button(action: {
                     onClose()
                     onLaunchClaude()
                 }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "play.fill").font(.system(size: 11))
-                        Text("立即安全启动 Claude").font(.system(size: 12, weight: .semibold))
+                    HStack(spacing: 7) {
+                        Image(systemName: "play.fill").font(.system(size: 12.5))
+                        Text("立即安全启动 Claude").font(.system(size: 14, weight: .semibold))
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8.5)
+                    .frame(height: 42)
                     .foregroundColor(.white)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(brandGradient))
+                    .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(brandGradient))
+                    .shadow(color: Color(red: 0.75, green: 0.31, blue: 0.18).opacity(0.28), radius: 8, y: 3)
                 }
-                .buttonStyle(SnappyButtonStyle(scale: 0.98))
+                .buttonStyle(SnappyButtonStyle(scale: 0.985))
             }
         }
     }
@@ -3473,9 +3610,12 @@ private final class SetupWizardWindowController {
                 self?.dismiss()
                 viewModel.confirmAndUninstall()
             },
-            onApplied: {
+            onApplied: { [weak self] in
                 viewModel.refresh()
                 viewModel.refreshPurity(silent: true)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    self?.resizeAndCenter()
+                }
             }
         )
 
@@ -3485,7 +3625,7 @@ private final class SetupWizardWindowController {
         }
 
         let panel = LaunchGuardPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 452, height: 480),
+            contentRect: NSRect(x: 0, y: 0, width: 580, height: 580),
             styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -3511,12 +3651,12 @@ private final class SetupWizardWindowController {
         contentView.layoutSubtreeIfNeeded()
         let fitting = contentView.fittingSize
         if fitting.width > 0 && fitting.height > 0 {
-            panel.setContentSize(NSSize(width: 452, height: ceil(fitting.height)))
+            panel.setContentSize(NSSize(width: 580, height: ceil(fitting.height)))
         }
         if let screen = NSScreen.main ?? NSScreen.screens.first {
             let vf = screen.visibleFrame
             let sz = panel.frame.size
-            panel.setFrameOrigin(NSPoint(x: vf.midX - sz.width / 2.0, y: vf.midY - sz.height / 2.0 + 24))
+            panel.setFrameOrigin(NSPoint(x: vf.midX - sz.width / 2.0, y: vf.midY - sz.height / 2.0 + 20))
         } else {
             panel.center()
         }
