@@ -35,12 +35,15 @@ struct TelemetrySnapshot: Sendable {
     let targetTZ: String
     let proxyIP: String
     let proxyLatencyMs: Int?
+    let proxyColo: String?
     let tunIP: String
     let tunLatencyMs: Int?
+    let apiLatencyMs: Int?
     let oauthLocked: Bool
     let originalHidden: Bool
     let sandboxEnabled: Bool
     let desktopPID: String?
+    let desktopProxyBound: Bool
     let cliReady: Bool
     let checkedAt: String
 
@@ -49,8 +52,18 @@ struct TelemetrySnapshot: Sendable {
 
     var proxyOK: Bool { !expectedIP.isEmpty && expectedIP != "未配置" && proxyIP == expectedIP }
     var tunOK: Bool { !expectedIP.isEmpty && expectedIP != "未配置" && tunIP == expectedIP }
-    var isSafe: Bool { proxyOK && tunOK }
     var desktopRunning: Bool { desktopPID != nil }
+    var desktopUnprotected: Bool { desktopRunning && !desktopProxyBound }
+
+    /// True if either channel returned a real IP that does NOT match expectedIP (definite node drift / leak)
+    var isConfirmedIPDrift: Bool {
+        guard !expectedIP.isEmpty && expectedIP != "未配置" else { return false }
+        let proxyDrifted = !proxyIP.isEmpty && proxyIP != "..." && proxyIP != "无法连通" && proxyIP != expectedIP
+        let tunDrifted = !tunIP.isEmpty && tunIP != "..." && tunIP != "无法连通" && tunIP != expectedIP
+        return proxyDrifted || tunDrifted
+    }
+
+    var isSafe: Bool { proxyOK && tunOK && !desktopUnprotected }
     var defenseScore: Int {
         var s = 0
         if proxyOK { s += 1 }
@@ -58,7 +71,7 @@ struct TelemetrySnapshot: Sendable {
         if oauthLocked { s += 1 }
         if originalHidden { s += 1 }
         if sandboxEnabled { s += 1 }
-        if cliReady || desktopRunning { s += 1 }
+        if !desktopUnprotected && (cliReady || desktopRunning) { s += 1 }
         return s
     }
 
@@ -68,12 +81,15 @@ struct TelemetrySnapshot: Sendable {
         targetTZ: "America/Los_Angeles",
         proxyIP: "...",
         proxyLatencyMs: nil,
+        proxyColo: nil,
         tunIP: "...",
         tunLatencyMs: nil,
+        apiLatencyMs: nil,
         oauthLocked: false,
         originalHidden: false,
         sandboxEnabled: false,
         desktopPID: nil,
+        desktopProxyBound: true,
         cliReady: false,
         checkedAt: "--:--:--"
     )
@@ -102,56 +118,76 @@ private enum TelemetryProbe {
         }
     }
 
-    static func fetchIP(viaProxy: Bool, port: String) -> (ip: String, ms: Int?) {
-        let endpoints: [(url: String, isTrace: Bool)] = [
-            ("https://1.1.1.1/cdn-cgi/trace", true),
-            ("https://api.ipify.org", false),
-            ("https://ifconfig.me/ip", false)
-        ]
-        for ep in endpoints {
-            var args = ["-fsS", "--max-time", "4", "-w", "\n__TIMING__:%{time_appconnect} %{time_starttransfer} %{time_total}"]
-            if viaProxy {
-                args += ["-x", "http://127.0.0.1:\(port)"]
-            } else {
-                args += ["--noproxy", "*"]
-            }
-            args.append(ep.url)
+    /// Fresh-route IP check + 2nd keep-alive HTTP/2 request for exact 1-RTT wire latency (zero TLS/handshake inflation, zero stale-socket blindness)
+    static func fetchIPAndExactRTT(viaProxy: Bool, port: String) -> (ip: String, ms: Int?, colo: String?) {
+        let proxyArgs: [String] = viaProxy ? ["-x", "http://127.0.0.1:\(port)"] : ["--noproxy", "*"]
 
+        // Primary: Cloudflare trace (2-step keep-alive on a fresh connection: req1 verifies fresh route IP + colo, req2 measures pure 1-RTT)
+        let traceArgs = ["-4", "-fsS", "--http2", "--max-time", "4"] + proxyArgs + [
+            "https://1.1.1.1/cdn-cgi/trace",
+            "--next",
+            "-4", "-fsS", "--http2", "--max-time", "3", "-I", "-o", "/dev/null",
+            "-w", "\n__EXACT_RTT__:%{time_starttransfer}"
+        ] + proxyArgs + ["https://1.1.1.1/cdn-cgi/trace"]
+
+        let traceRes = run("/usr/bin/curl", traceArgs)
+        if !traceRes.output.isEmpty {
+            let parts = traceRes.output.components(separatedBy: "\n__EXACT_RTT__:")
+            let body = parts.first ?? ""
+            let ip = body
+                .split(separator: "\n")
+                .first(where: { $0.hasPrefix("ip=") })
+                .map { String($0.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+            let colo = body
+                .split(separator: "\n")
+                .first(where: { $0.hasPrefix("colo=") })
+                .map { String($0.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines) }
+
+            if !ip.isEmpty, ip.count <= 45, !ip.contains(" ") {
+                var rttMs: Int? = nil
+                if parts.count > 1, let sec = Double(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)), sec > 0 {
+                    rttMs = max(1, Int((sec * 1000.0).rounded()))
+                }
+                return (ip, rttMs, colo)
+            }
+        }
+
+        // Fallbacks: api.ipify.org, ifconfig.me
+        for url in ["https://api.ipify.org", "https://ifconfig.me/ip"] {
+            let args = ["-4", "-fsS", "--max-time", "4", "-w", "\n__TIMING__:%{time_appconnect} %{time_starttransfer} %{time_total}"] + proxyArgs + [url]
             let res = run("/usr/bin/curl", args)
             guard !res.output.isEmpty else { continue }
-
             let parts = res.output.components(separatedBy: "\n__TIMING__:")
-            let body = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let timingStr = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
-
-            let ip: String
-            if ep.isTrace {
-                ip = body
-                    .split(separator: "\n")
-                    .first(where: { $0.hasPrefix("ip=") })
-                    .map { String($0.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
-            } else {
-                ip = body
-            }
-
+            let ip = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !ip.isEmpty, ip.count <= 45, !ip.contains(" ") else { continue }
-
-            // Measure true 1-RTT HTTP latency (TTFB minus TLS handshake), fallback to total time
             var rttMs: Int? = nil
-            let nums = timingStr.split(separator: " ").compactMap { Double($0) }
-            if nums.count == 3 {
-                let tls = nums[0]
-                let ttfb = nums[1]
-                let total = nums[2]
-                if tls > 0 && ttfb > tls {
-                    rttMs = max(1, Int(((ttfb - tls) * 1000.0).rounded()))
-                } else if total > 0 {
-                    rttMs = max(1, Int((total * 1000.0).rounded()))
+            if parts.count > 1 {
+                let nums = parts[1].trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ").compactMap { Double($0) }
+                if nums.count == 3 {
+                    let delta = (nums[0] > 0 && nums[1] > nums[0]) ? (nums[1] - nums[0]) : nums[2]
+                    if delta > 0 { rttMs = max(1, Int((delta * 1000.0).rounded())) }
                 }
             }
-            return (ip, rttMs ?? (res.ms > 0 ? res.ms : nil))
+            return (ip, rttMs, nil)
         }
-        return ("无法连通", nil)
+        return ("无法连通", nil, nil)
+    }
+
+    /// Measure exact 1-RTT wire latency directly to Anthropic API (api.anthropic.com) via 2-step HTTP/2 keep-alive
+    static func fetchAnthropicAPIRTT(port: String) -> Int? {
+        let proxyArgs = ["-x", "http://127.0.0.1:\(port)"]
+        let args = ["-4", "-sS", "--http2", "--max-time", "4", "-I", "-o", "/dev/null"] + proxyArgs + [
+            "https://api.anthropic.com",
+            "--next",
+            "-4", "-sS", "--http2", "--max-time", "3", "-I", "-o", "/dev/null",
+            "-w", "%{time_starttransfer}"
+        ] + proxyArgs + ["https://api.anthropic.com"]
+
+        let res = run("/usr/bin/curl", args)
+        if let sec = Double(res.output), sec > 0 {
+            return max(1, Int((sec * 1000.0).rounded()))
+        }
+        return nil
     }
 
     static func collect() -> TelemetrySnapshot {
@@ -170,19 +206,25 @@ private enum TelemetryProbe {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let targetTZ = rawTZ.isEmpty ? "America/Los_Angeles" : rawTZ
 
-        // Run dual-channel IP & RTT probes in parallel
+        // Run Proxy IP+RTT, TUN IP+RTT, and real Anthropic API 1-RTT in parallel
         let group = DispatchGroup()
-        var proxyRes: (ip: String, ms: Int?) = ("无法连通", nil)
-        var tunRes: (ip: String, ms: Int?) = ("无法连通", nil)
+        var proxyRes: (ip: String, ms: Int?, colo: String?) = ("无法连通", nil, nil)
+        var tunRes: (ip: String, ms: Int?, colo: String?) = ("无法连通", nil, nil)
+        var apiRtt: Int? = nil
 
         group.enter()
         DispatchQueue.global(qos: .userInitiated).async {
-            proxyRes = fetchIP(viaProxy: true, port: proxyPort)
+            proxyRes = fetchIPAndExactRTT(viaProxy: true, port: proxyPort)
             group.leave()
         }
         group.enter()
         DispatchQueue.global(qos: .userInitiated).async {
-            tunRes = fetchIP(viaProxy: false, port: proxyPort)
+            tunRes = fetchIPAndExactRTT(viaProxy: false, port: proxyPort)
+            group.leave()
+        }
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            apiRtt = fetchAnthropicAPIRTT(port: proxyPort)
             group.leave()
         }
         group.wait()
@@ -198,8 +240,14 @@ private enum TelemetryProbe {
         let settingsText = (try? String(contentsOfFile: settingsPath, encoding: .utf8)) ?? ""
         let sandboxEnabled = settingsText.contains("\"enabled\": true") || settingsText.contains("\"enabled\":true")
 
+        // Process-level proxy-binding audit for running Claude Desktop
         let pgrepRes = run("/usr/bin/pgrep", ["-x", "Claude"])
         let desktopPID = pgrepRes.output.split(separator: "\n").first.map(String.init)
+        var desktopProxyBound = true
+        if let pid = desktopPID {
+            let psRes = run("/bin/ps", ["-p", pid, "-o", "args="])
+            desktopProxyBound = psRes.output.contains("--proxy-server=http://127.0.0.1:\(proxyPort)")
+        }
 
         let cliReady = fm.isExecutableFile(atPath: home.appendingPathComponent(".local/bin/claude").path)
 
@@ -212,12 +260,15 @@ private enum TelemetryProbe {
             targetTZ: targetTZ,
             proxyIP: proxyRes.ip,
             proxyLatencyMs: proxyRes.ms,
+            proxyColo: proxyRes.colo,
             tunIP: tunRes.ip,
             tunLatencyMs: tunRes.ms,
+            apiLatencyMs: apiRtt,
             oauthLocked: oauthLocked,
             originalHidden: originalHidden,
             sandboxEnabled: sandboxEnabled,
             desktopPID: desktopPID,
+            desktopProxyBound: desktopProxyBound,
             cliReady: cliReady,
             checkedAt: df.string(from: Date())
         )
@@ -238,6 +289,7 @@ final class ShieldViewModel: ObservableObject {
 
     var onStatusChange: ((TelemetrySnapshot) -> Void)?
     private var timer: Timer?
+    private var consecutiveUnreachableCount = 0
 
     init() {
         self.autoKillOnBreach = UserDefaults.standard.object(forKey: "autoKillOnBreach") as? Bool ?? true
@@ -263,9 +315,30 @@ final class ShieldViewModel: ObservableObject {
                 self.isRefreshing = false
                 self.onStatusChange?(result)
 
-                // Fail-closed emergency auto-kill if IP drifts while Claude Desktop is running
-                if self.autoKillOnBreach && !result.isSafe && result.desktopRunning {
-                    self.emergencyKillClaude(reason: "检测到出口 IP 漂移（代理: \(result.proxyIP) / TUN: \(result.tunIP)），已自动急停 Claude 桌面版以防裸连！")
+                if result.isSafe {
+                    self.consecutiveUnreachableCount = 0
+                    return
+                }
+
+                // Smart Fail-Closed Auto-Kill:
+                // 1) Definite IP drift or unprotected Claude process -> instant 0s kill
+                // 2) Transient unreachable/timeout -> 1 immediate fast re-check before killing (zero false positives)
+                if self.autoKillOnBreach && result.desktopRunning {
+                    if result.desktopUnprotected {
+                        self.emergencyKillClaude(reason: "检测到未绑定硬代理的 Claude 桌面版进程（#\(result.desktopPID ?? "?")），已自动急停防裸连！")
+                    } else if result.isConfirmedIPDrift {
+                        self.emergencyKillClaude(reason: "检测到出口 IP 漂移（代理: \(result.proxyIP) / TUN: \(result.tunIP)），已自动急停 Claude 桌面版以防裸连！")
+                    } else {
+                        self.consecutiveUnreachableCount += 1
+                        if self.consecutiveUnreachableCount >= 2 {
+                            self.consecutiveUnreachableCount = 0
+                            self.emergencyKillClaude(reason: "连续检测到代理/TUN 通道中断，已自动急停 Claude 桌面版（Fail-Closed）！")
+                        } else {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                self.refresh()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -306,15 +379,16 @@ final class ShieldViewModel: ObservableObject {
     func copyDiagnostics() {
         let s = snapshot
         let report = """
-        [Claude Shield Telemetry · \(s.checkedAt)]
+        [Claude Shield v2.2 Telemetry · \(s.checkedAt)]
         Status: \(s.isSafe ? "ARMED (SAFE)" : "BREACH WARNING")
-        Whitelist IP: \(s.expectedIP) (\(s.targetTZ))
+        Whitelist IP: \(s.expectedIP) (\(s.targetTZ)\(s.proxyColo.map { " · \($0)" } ?? ""))
+        Anthropic API 1-RTT: \(s.apiLatencyMs.map { "\($0)ms" } ?? "N/A")
         Proxy (127.0.0.1:\(s.proxyPort)): \(s.proxyIP) (\(s.proxyLatencyMs.map { "\($0)ms" } ?? "N/A"))
         TUN Route: \(s.tunIP) (\(s.tunLatencyMs.map { "\($0)ms" } ?? "N/A"))
         OAuth Lock: \(s.oauthLocked ? "AdsPower-Only" : "Unlocked")
         Original App Vault: \(s.originalHidden ? "Hidden" : "Exposed")
         macOS Seatbelt Sandbox: \(s.sandboxEnabled ? "Enabled" : "Disabled")
-        Desktop Process: \(s.desktopPID.map { "Running (PID \($0))" } ?? "Idle")
+        Desktop Process: \(s.desktopPID.map { s.desktopProxyBound ? "Protected (PID \($0))" : "UNPROTECTED (PID \($0))" } ?? "Idle")
         CLI Guard: \(s.cliReady ? "Armed" : "Not Installed")
         """
         NSPasteboard.general.clearContents()
@@ -470,10 +544,17 @@ struct ShieldPopoverView: View {
                     Text(vm.snapshot.expectedIP)
                         .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
                         .foregroundColor(.primary.opacity(0.84))
-                    Text("· \(vm.snapshot.regionFull)")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(labelColor)
-                        .lineLimit(1)
+                    if let apiMs = vm.snapshot.apiLatencyMs {
+                        Text(verbatim: "· API \(apiMs)ms")
+                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                            .foregroundColor(latencyColor(apiMs))
+                            .lineLimit(1)
+                    } else {
+                        Text("· \(vm.snapshot.proxyColo ?? vm.snapshot.regionFull)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(labelColor)
+                            .lineLimit(1)
+                    }
                 }
             }
 
@@ -593,7 +674,13 @@ struct ShieldPopoverView: View {
                 metricTile(icon: "cube.transparent.fill", title: "macOS 沙盒", value: vm.snapshot.sandboxEnabled ? "Seatbelt 已启" : "未启用", ok: vm.snapshot.sandboxEnabled)
             }
             HStack(spacing: 8) {
-                metricTile(icon: "desktopcomputer", title: "桌面版进程", value: vm.snapshot.desktopPID.map { "受保护 · #\($0)" } ?? "待机未启动", ok: true, dim: !vm.snapshot.desktopRunning)
+                metricTile(
+                    icon: "desktopcomputer",
+                    title: "桌面版进程",
+                    value: vm.snapshot.desktopPID.map { vm.snapshot.desktopProxyBound ? "受保护 · #\($0)" : "未绑定代理 · #\($0)" } ?? "待机未启动",
+                    ok: !vm.snapshot.desktopUnprotected,
+                    dim: !vm.snapshot.desktopRunning
+                )
                 metricTile(icon: "terminal.fill", title: "Claude Code", value: vm.snapshot.cliReady ? "CLI 防护就绪" : "待初始化", ok: vm.snapshot.cliReady)
             }
         }
@@ -720,7 +807,7 @@ struct ShieldPopoverView: View {
     // 6. Footer
     private var footerBar: some View {
         HStack {
-            Text("Claude Shield v2.1 · 巡检 \(vm.snapshot.checkedAt)")
+            Text("Claude Shield v2.2 · 巡检 \(vm.snapshot.checkedAt)")
                 .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                 .foregroundColor(labelColor)
             Spacer()
@@ -810,10 +897,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewModel.onStatusChange = { [weak self] snap in
             guard let self = self, let button = self.statusItem.button else { return }
             if snap.isSafe {
-                let msText = snap.proxyLatencyMs.map { " \($0)ms" } ?? ""
+                let bestMs = snap.apiLatencyMs ?? snap.proxyLatencyMs
+                let msText = bestMs.map { " \($0)ms" } ?? ""
                 button.title = "🟢 \(snap.regionShort)\(msText)"
             } else {
-                button.title = "🔴 IP 异常!"
+                button.title = snap.desktopUnprotected ? "🔴 进程未受保护!" : "🔴 IP 异常!"
             }
             if self.popover.isShown {
                 self.updatePopoverSize()

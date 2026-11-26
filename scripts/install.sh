@@ -65,18 +65,18 @@ PROXY_SOCKS="socks5h://127.0.0.1:\${PROXY_PORT}"
 fetch_ip() {
   local mode="\$1" ip="" body=""
   if [[ "\${mode}" == "proxy" ]]; then
-    body="\$(curl -fsS --max-time 4 -x "\${PROXY_HTTP}" "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)"
+    body="\$(curl -4 -fsS --max-time 4 -x "\${PROXY_HTTP}" "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)"
   else
-    body="\$(curl -fsS --max-time 4 --noproxy '*' "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)"
+    body="\$(curl -4 -fsS --max-time 4 --noproxy '*' "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)"
   fi
   ip="\$(printf '%s\n' "\${body}" | sed -n 's/^ip=//p' | tr -d '[:space:]')"
   [[ -n "\${ip}" ]] && { echo "\${ip}"; return 0; }
 
   for url in "https://api.ipify.org" "https://ifconfig.me/ip"; do
     if [[ "\${mode}" == "proxy" ]]; then
-      ip="\$(curl -fsS --max-time 4 -x "\${PROXY_HTTP}" "\${url}" 2>/dev/null | tr -d '[:space:]' || true)"
+      ip="\$(curl -4 -fsS --max-time 4 -x "\${PROXY_HTTP}" "\${url}" 2>/dev/null | tr -d '[:space:]' || true)"
     else
-      ip="\$(curl -fsS --max-time 4 --noproxy '*' "\${url}" 2>/dev/null | tr -d '[:space:]' || true)"
+      ip="\$(curl -4 -fsS --max-time 4 --noproxy '*' "\${url}" 2>/dev/null | tr -d '[:space:]' || true)"
     fi
     [[ -n "\${ip}" ]] && { echo "\${ip}"; return 0; }
   done
@@ -84,9 +84,18 @@ fetch_ip() {
 }
 
 check_claude_guard() {
-  local proxy_ip tun_ip
-  proxy_ip="\$(fetch_ip proxy || true)"
-  tun_ip="\$(fetch_ip tun || true)"
+  local tmp_proxy tmp_tun proxy_ip tun_ip
+  tmp_proxy="\$(mktemp)"
+  tmp_tun="\$(mktemp)"
+  (fetch_ip proxy || true) > "\${tmp_proxy}" &
+  local pid_p=\$!
+  (fetch_ip tun || true) > "\${tmp_tun}" &
+  local pid_t=\$!
+  wait "\${pid_p}" "\${pid_t}" 2>/dev/null || true
+  proxy_ip="\$(cat "\${tmp_proxy}" 2>/dev/null || true)"
+  tun_ip="\$(cat "\${tmp_tun}" 2>/dev/null || true)"
+  rm -f "\${tmp_proxy}" "\${tmp_tun}"
+
   [[ -z "\${proxy_ip}" ]] && { echo "CLAUDE_GUARD_ERR:本地代理 127.0.0.1:\${PROXY_PORT} 无法连通。"; return 1; }
   [[ "\${proxy_ip}" != "\${EXPECTED_IP}" ]] && { echo "CLAUDE_GUARD_ERR:代理出口 IP 异常（当前: \${proxy_ip}，期望: \${EXPECTED_IP}）。"; return 1; }
   [[ -z "\${tun_ip}" ]] && { echo "CLAUDE_GUARD_ERR:默认路由（TUN）无法连通外网。"; return 1; }
@@ -104,6 +113,8 @@ export_claude_env() {
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
   export DISABLE_TELEMETRY="1"
   export DISABLE_ERROR_REPORTING="1"
+  export OTEL_SDK_DISABLED="1"
+  export DO_NOT_TRACK="1"
 }
 EOF
 
@@ -152,10 +163,29 @@ if [[ ! -d "${CLAUDE_APP}" ]]; then
   /usr/bin/osascript -e 'display dialog "未检测到 Claude 桌面版（Claude.app），请先安装 Claude Desktop。" buttons {"知道了"} default button 1 with icon note with title "Claude Shield"' >/dev/null 2>&1 || true
   exit 0
 fi
-pgrep -x "Claude" >/dev/null 2>&1 && { open -a "${CLAUDE_APP}"; exit 0; }
+# If Claude Desktop is already running, verify it has hard proxy binding; otherwise kill and relaunch safely
+EXISTING_PID="$(pgrep -x "Claude" | head -n 1 || true)"
+if [[ -n "${EXISTING_PID}" ]]; then
+  if ps -p "${EXISTING_PID}" -o args= 2>/dev/null | grep -q -- "--proxy-server=http://127.0.0.1:${PROXY_PORT}"; then
+    open -a "${CLAUDE_APP}"
+    exit 0
+  else
+    pkill -9 -x "Claude" 2>/dev/null || true
+    sleep 0.4
+  fi
+fi
+
+# Launch with hardened Electron network isolation:
+# - Hard proxy binding (fail-closed)
+# - Zero local DNS leak (--host-resolver-rules)
+# - Zero UDP/QUIC bypass (--disable-quic)
+# - Zero WebRTC non-proxied UDP leak
 nohup "${CLAUDE_APP}/Contents/MacOS/Claude" \
   --proxy-server="http://127.0.0.1:${PROXY_PORT}" \
   --proxy-bypass-list="<-loopback>" \
+  --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1, EXCLUDE localhost" \
+  --disable-quic \
+  --force-webrtc-ip-handling-policy=disable_non_proxied_udp \
   --lang="en-US" >/dev/null 2>&1 &
 disown || true
 EOF
@@ -214,8 +244,8 @@ if command -v swiftc >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/app/ClaudeShieldApp.
   <key>CFBundleIdentifier</key><string>com.local.claude.shield</string>
   <key>CFBundleName</key><string>Claude Shield</string>
   <key>CFBundleDisplayName</key><string>Claude Shield</string>
-  <key>CFBundleVersion</key><string>2.1</string>
-  <key>CFBundleShortVersionString</key><string>2.1</string>
+  <key>CFBundleVersion</key><string>2.2</string>
+  <key>CFBundleShortVersionString</key><string>2.2</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>${ICON_NAME}</string>
   <key>LSUIElement</key><true/>

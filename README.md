@@ -30,11 +30,11 @@
 | 防线 | 机制 | 解决什么痛点 |
 | :--- | :--- | :--- |
 | **① 双通道 IP 门禁锁（Kill-Switch）** | 启动前并行校验本地代理端口（如 `:7897`）与系统默认路由（TUN）出口 IP，必须严格等于白名单独享 IP | 忘开代理、TUN 异常退出或误切机场节点导致裸连 |
-| **② 运行中硬代理绑定（Fail-Closed）** | CLI 注入 `HTTP/HTTPS/ALL_PROXY`；桌面版注入 Electron `--proxy-server` + `--proxy-bypass-list="<-loopback>"` | 运行中途代理崩溃后悄悄回退宿主机物理网卡 |
+| **② 运行中硬代理绑定 + 零泄漏网络隔离** | CLI 注入 `HTTP/HTTPS/ALL_PROXY`；桌面版注入 `--proxy-server` + `--host-resolver-rules`（防本地 DNS 泄漏）+ `--disable-quic`（防 UDP/QUIC 绕过）+ `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` | 运行中途代理崩溃回退直连，或 Electron 通过 DNS/QUIC/WebRTC 悄悄漏出真实 IP |
 | **③ 二合一原生 App + 原版防误触隐藏** | 自动将原版 `Claude.app` 移入隐藏仓 `~/.local/apps/`（禁 Spotlight 索引、保留官方签名）；`/Applications` 仅保留零跳动的 `Claude Shield.app` | 手滑点开原版客户端裸连，或在应用栏里出现两个割裂的图标 |
 | **④ OAuth 强制拦截（AdsPower-Only）** | 拦截 `open` / `$BROWSER` 对 `claude.ai` 与 `anthropic.com` 的拉起，自动复制授权链接到剪贴板 | 首次登录/续期时误弹宿主机浏览器导致环境关联 |
 | **⑤ 进程级时区/语言对齐 + Seatbelt 沙盒** | 动态注入目标时区与 `en-US`（不改动系统时钟），开启 `~/.claude/settings.json` 官方沙盒并禁用遥测 | IP 地区与客户端时区冲突、Agent 越权读写或多余遥测外联 |
-| **⑥ 商业级 SwiftUI 状态栏雷达** | 原生毛玻璃 Popover（自适应明暗模式），每 15 秒并行探测双通道 IP 与真实 1-RTT 延迟，支持 **IP 漂移自动急停（Auto-Kill）**、一键聚焦与诊断复制 | 后台节点悄悄漂移时肉眼无感知，或未及时阻断 |
+| **⑥ 商业级 SwiftUI 状态栏雷达** | 原生毛玻璃 Popover（明暗模式自适应），每 15 秒并行探测双通道 IP、**真实 Anthropic API 1-RTT 延迟**（双步 HTTP/2 Keep-Alive 去握手误差）与**运行中进程代理绑定审计**，内置零误杀 **IP 漂移自动急停** | 后台节点漂移或误启未绑定代理进程时肉眼无感知，或冷建连测速虚高 |
 
 ---
 
