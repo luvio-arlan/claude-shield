@@ -267,7 +267,8 @@ if command -v swiftc >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/app/ClaudeShieldApp.
   mkdir -p "${SHIELD_APP}/Contents/MacOS" "${SHIELD_APP}/Contents/Resources"
 
   echo "🦅 Compiling native SwiftUI radar app (/Applications/Claude Shield.app)..."
-  swiftc -O -framework Cocoa -framework SwiftUI -framework Network \
+  swiftc -O -target "$(uname -m)-apple-macos13.0" \
+    -framework Cocoa -framework SwiftUI -framework Network -framework QuartzCore \
     "${REPO_ROOT}/app/ClaudeShieldApp.swift" \
     -o "${SHIELD_APP}/Contents/MacOS/ClaudeShield"
 
@@ -300,16 +301,19 @@ if command -v swiftc >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/app/ClaudeShieldApp.
   <key>CFBundleIdentifier</key><string>com.local.claude.shield</string>
   <key>CFBundleName</key><string>Claude Shield</string>
   <key>CFBundleDisplayName</key><string>Claude Shield</string>
-  <key>CFBundleVersion</key><string>3.1.0</string>
-  <key>CFBundleShortVersionString</key><string>3.1.0</string>
+  <key>CFBundleVersion</key><string>3.2.0</string>
+  <key>CFBundleShortVersionString</key><string>3.2.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>${ICON_NAME}</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
 EOF
+  codesign --force --deep --sign - "${SHIELD_APP}" >/dev/null 2>&1 || true
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "${SHIELD_APP}" >/dev/null 2>&1 || true
-  echo "✅ Built /Applications/Claude Shield.app v3.0 (Rust Core + SwiftUI Radar + Purity Audit)"
+  echo "✅ Built /Applications/Claude Shield.app v3.2.0 (Rust Core + SwiftUI Studio Console & Radar)"
 fi
 
 # 9. Harden ~/.claude/settings.json (merge non-destructively via Python so user preferences are preserved)

@@ -33,7 +33,7 @@
 
 用虚拟机套娃（Lima / Docker）虽然能隔离，却动辄常驻 **2–4GB 内存**、拖慢本地文件 I/O、配置门槛极高。
 
-**Claude Shield v3.1** 用 **原生 Rust 核心引擎 + 原生 SwiftUI 菜单栏应用** 彻底解决这些问题：**下载 App、拖进应用程序、点一下「一键部署」**，无需命令行、无需安装 Rust/Xcode，常驻内存 **< 20MB**；不需要时 **一键卸载并 100% 还原原版应用与所有系统配置**。
+**Claude Shield v3.2** 用 **原生 Rust 核心引擎 + 原生 SwiftUI 菜单栏雷达 & Studio 控制台** 彻底解决这些问题：**下载 App、拖进应用程序、点一下「一键部署」**，无需命令行、无需安装 Rust/Xcode，常驻内存 **< 20MB**；不需要时 **一键卸载并 100% 还原原版应用与所有系统配置**。
 
 ---
 
@@ -42,7 +42,7 @@
 ### 1. 下载安装
 
 前往 **[GitHub Releases 最新版本](https://github.com/luvio-arlan/claude-shield/releases/latest)** 下载：
-- **`Claude-Shield-v3.1.0-macOS-arm64.dmg`**（推荐，双击打开后拖入 `Applications` 文件夹即可）
+- **`Claude-Shield-v3.2.0-macOS-arm64.dmg`**（推荐，双击打开后拖入 `Applications` 文件夹即可）
 
 > **首次打开提示**：由于开源版本采用 Ad-hoc 本地签名（未购买 Apple 付费公证证书），首次打开若遇到 macOS 安全提示，请在终端执行一次即可永久放行：
 > ```bash
@@ -111,9 +111,10 @@ bash scripts/uninstall.sh
 
 ## 日常使用与终端诊断命令
 
-1. **安全启动桌面版**：直接从 Spotlight / 启动台 / 菜单栏打开 `Claude Shield`，毫秒级验真并安全拉起 Claude 桌面版。
-2. **菜单栏实时雷达**：点击状态栏 `LA 185ms · S` 图标，切换 **「实时雷达」** 与 **「纯净度体检」** 双页签，支持一键测速、一键体检、一键 2x Retina 诊断截图、防护设置与卸载还原。
-3. **终端 Claude Code**：直接运行 `claude`，自动经由 Rust 核心极速验真并注入全套防封环境。
+1. **主流 macOS 应用体验**：状态栏默认常驻（`<5ms` 缓存瞬开），点击应用图标或「打开控制台」进入独立 Studio 控制台并在 Dock 显示图标；支持原生最小化至 Dock 图标、关闭/收至状态栏退隐、零卡顿秒切状态栏雷达，并内置应用内版本更新检测。
+2. **安全启动桌面版**：在状态栏或控制台点击「安全启动 Claude」，毫秒级验真并安全拉起 Claude 桌面版。
+3. **菜单栏实时雷达**：点击状态栏 `LA 185ms · S` 图标，快速查看节点状态、纯净度评分、一键测速、一键 2x Retina 诊断截图、进入控制台与卸载还原。
+4. **终端 Claude Code**：直接运行 `claude`，自动经由 Rust 核心极速验真并注入全套防封环境。
 4. **终端诊断工具 (`claude-shield`)**：
    ```bash
    claude-shield purity                 # 执行 ip.net.coffee 级多源 IP 纯净度深度体检
@@ -133,7 +134,7 @@ git clone https://github.com/luvio-arlan/claude-shield.git
 cd claude-shield
 
 # 打包独立的 macOS .app / .dmg / .zip（输出至 dist/）
-bash scripts/build-release.sh 3.1.0
+bash scripts/build-release.sh 3.2.0
 
 # 或直接通过命令行安装到本机
 bash scripts/install.sh \

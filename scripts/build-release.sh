@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Claude Shield v3.1 — Standalone macOS .app + .dmg + .zip Release Packager
+# Claude Shield v3.2 — Standalone macOS .app + .dmg + .zip Release Packager
 set -euo pipefail
 
-VERSION="${1:-3.1.0}"
+VERSION="${1:-3.2.0}"
 ARCH="$(uname -m)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -23,7 +23,7 @@ chmod +x "${APP_DIR}/Contents/MacOS/claude-shield-core"
 
 echo "🦅 [2/5] Compiling native SwiftUI App (macOS 13.0+ ${ARCH})..."
 swiftc -O -target "${ARCH}-apple-macos13.0" \
-  -framework Cocoa -framework SwiftUI -framework Network \
+  -framework Cocoa -framework SwiftUI -framework Network -framework QuartzCore \
   "${REPO_ROOT}/app/ClaudeShieldApp.swift" \
   -o "${APP_DIR}/Contents/MacOS/ClaudeShield"
 chmod +x "${APP_DIR}/Contents/MacOS/ClaudeShield"

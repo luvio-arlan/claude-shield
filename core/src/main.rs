@@ -159,7 +159,7 @@ async fn main() {
             }
         }
         _ => {
-            println!("Claude Shield Core v3.1 (Native Rust Engine)");
+            println!("Claude Shield Core v3.2 (Native Rust Engine)");
             println!("Usage: claude-shield-core <telemetry|gate|purity|patrol|hide-original|detect|setup|uninstall|exec-cli|launch-desktop> [--json]");
         }
     }

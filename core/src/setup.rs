@@ -798,10 +798,10 @@ pub fn run_uninstall(cfg: &ShieldConfig, remove_app: bool) -> UninstallReport {
     let claude_wrapper = local_bin.join("claude");
     if claude_wrapper.exists() {
         if let Ok(text) = fs::read_to_string(&claude_wrapper) {
-            if text.contains("claude-shield") || text.contains("claude-guard") {
-                if fs::remove_file(&claude_wrapper).is_ok() {
-                    removed_cli = true;
-                }
+            if (text.contains("claude-shield") || text.contains("claude-guard"))
+                && fs::remove_file(&claude_wrapper).is_ok()
+            {
+                removed_cli = true;
             }
         }
     }
