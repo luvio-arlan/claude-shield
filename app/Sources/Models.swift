@@ -28,18 +28,38 @@ struct LocalDefenseModel: Codable, Sendable {
     let sandbox_enabled: Bool
     let telemetry_disabled: Bool
     let desktop_pid: String?
+    let desktop_pids: [String]?
     let desktop_proxy_bound: Bool
+    let desktop_bypass_locked: Bool?
     let desktop_quic_disabled: Bool
     let desktop_webrtc_locked: Bool
+    let active_cli_pids: [String]?
     let unprotected_cli_pids: [String]
     let cli_ready: Bool
     let login_item_enabled: Bool
     let daily_patrol_enabled: Bool
 
     var hideOriginalPreference: Bool { hide_original_enabled ?? true }
+    var isDesktopBypassLocked: Bool { desktop_bypass_locked ?? true }
+    var allDesktopPIDs: [String] { desktop_pids ?? desktop_pid.map { [$0] } ?? [] }
+    var activeCLIPIDs: [String] { active_cli_pids ?? [] }
+}
+
+struct LaunchDesktopOutcomeModel: Codable, Sendable {
+    let ok: Bool
+    let already_running: Bool
+    let pid: Int?
+    let message: String
+}
+
+struct KillOutcomeModel: Codable, Sendable {
+    let killed_desktop: Int
+    let killed_cli: Int
 }
 
 struct TelemetrySnapshot: Codable, Sendable {
+    static let blockedRegions: Set<String> = ["CN", "HK", "MO", "RU", "BY", "KP", "IR", "SY", "CU", "VE"]
+
     let expected_ip: String
     let proxy_port: Int
     let target_tz: String
@@ -54,11 +74,28 @@ struct TelemetrySnapshot: Codable, Sendable {
 
     var proxyOK: Bool { !expected_ip.isEmpty && expected_ip != "未配置" && proxy.reachable && proxy.ip == expected_ip }
     var tunOK: Bool { !expected_ip.isEmpty && expected_ip != "未配置" && tun.reachable && tun.ip == expected_ip }
-    var desktopRunning: Bool { defenses.desktop_pid != nil }
-    var desktopUnprotected: Bool {
-        desktopRunning && (!defenses.desktop_proxy_bound || !defenses.desktop_quic_disabled || !defenses.desktop_webrtc_locked)
+    var regionBanned: Bool {
+        if let loc = claude_edge.loc?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+           Self.blockedRegions.contains(loc) {
+            return true
+        }
+        if let loc = tun.loc?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+           Self.blockedRegions.contains(loc) {
+            return true
+        }
+        return false
     }
+    var desktopRunning: Bool { defenses.desktop_pid != nil || !defenses.allDesktopPIDs.isEmpty }
+    var desktopUnprotected: Bool {
+        desktopRunning
+            && (!defenses.desktop_proxy_bound
+                || !defenses.isDesktopBypassLocked
+                || !defenses.desktop_quic_disabled
+                || !defenses.desktop_webrtc_locked)
+    }
+    var hasActiveCLI: Bool { !defenses.activeCLIPIDs.isEmpty }
     var hasUnprotectedCLI: Bool { !defenses.unprotected_cli_pids.isEmpty }
+    var anyClaudeRunning: Bool { desktopRunning || hasActiveCLI }
 
     var isConfirmedIPDrift: Bool {
         guard !expected_ip.isEmpty && expected_ip != "未配置" else { return false }
@@ -67,12 +104,14 @@ struct TelemetrySnapshot: Codable, Sendable {
         return proxyDrifted || tunDrifted
     }
 
-    var isSafe: Bool { proxyOK && tunOK && !desktopUnprotected && !hasUnprotectedCLI }
+    var isConfirmedNetworkBreach: Bool { isConfirmedIPDrift || regionBanned }
+
+    var isSafe: Bool { proxyOK && tunOK && !regionBanned && !desktopUnprotected && !hasUnprotectedCLI }
 
     var defenseScore: Int {
         var s = 0
-        if proxyOK { s += 1 }
-        if tunOK { s += 1 }
+        if proxyOK && !regionBanned { s += 1 }
+        if tunOK && !regionBanned { s += 1 }
         if defenses.oauth_locked { s += 1 }
         if defenses.original_hidden { s += 1 }
         if defenses.sandbox_enabled && defenses.telemetry_disabled { s += 1 }
@@ -116,9 +155,12 @@ struct TelemetrySnapshot: Codable, Sendable {
             sandbox_enabled: false,
             telemetry_disabled: false,
             desktop_pid: nil,
+            desktop_pids: [],
             desktop_proxy_bound: true,
+            desktop_bypass_locked: true,
             desktop_quic_disabled: true,
             desktop_webrtc_locked: true,
+            active_cli_pids: [],
             unprotected_cli_pids: [],
             cli_ready: false,
             login_item_enabled: false,
@@ -255,7 +297,7 @@ struct LaunchGuardContext: Sendable {
     var isCritical: Bool {
         if !gateOK { return true }
         if let p = purity {
-            if !p.region_supported || p.dns_leak || p.purity_score < 60 { return true }
+            if !p.region_supported || p.dns_leak || p.ipv6_leak || p.purity_score < 60 { return true }
         }
         if currentIP == "无法连通" || currentIP.isEmpty { return true }
         return false

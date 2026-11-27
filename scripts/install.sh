@@ -45,8 +45,10 @@ CORE_BIN="$HOME/.local/bin/claude-shield-core"
 if command -v cargo >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/core/Cargo.toml" ]]; then
   echo "🦀 Building native Rust core engine v${VERSION} (claude-shield-core)..."
   (cd "${REPO_ROOT}/core" && MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --release --quiet)
-  cp "${REPO_ROOT}/core/target/release/claude-shield-core" "${CORE_BIN}"
-  chmod +x "${CORE_BIN}"
+  CORE_TMP="${CORE_BIN}.tmp.$$"
+  cp "${REPO_ROOT}/core/target/release/claude-shield-core" "${CORE_TMP}"
+  chmod +x "${CORE_TMP}"
+  mv -f "${CORE_TMP}" "${CORE_BIN}"
   echo "✅ Built native Rust core: ${CORE_BIN}"
 elif [[ ! -x "${CORE_BIN}" ]]; then
   echo "❌ Neither cargo nor an existing ${CORE_BIN} was found. Install Rust via 'brew install rust' or use the .dmg installer." >&2

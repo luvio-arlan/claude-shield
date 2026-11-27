@@ -6,6 +6,7 @@ pub mod latency;
 pub mod patrol;
 pub mod pf_guard;
 pub mod probe;
+pub mod probe_pool;
 pub mod proc_audit;
 pub mod purity;
 pub mod purity_score;
@@ -17,6 +18,7 @@ use chrono::Local;
 use config::{tz_short_and_full, ShieldConfig};
 use guard::LocalDefenseAudit;
 use probe::{ApiLatencyMetrics, ChannelProbe, NetworkProbeResult};
+use purity_score::is_region_supported;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -95,8 +97,15 @@ pub fn evaluate_gate_with_probes(
             tun.ip, cfg.expected_ip
         ));
     } else if let Some(ref loc) = edge.loc {
-        if matches!(loc.as_str(), "CN" | "HK" | "MO" | "RU" | "BY" | "KP" | "IR" | "SY" | "CU") {
+        if !is_region_supported(loc) {
             error = Some(format!("Claude Cloudflare 边缘识别到封禁地区 ({})，已强制熔断！", loc));
+        }
+    }
+    if error.is_none() {
+        if let Some(ref loc) = tun.loc {
+            if !is_region_supported(loc) {
+                error = Some(format!("TUN 默认路由识别到封禁地区 ({})，已强制熔断！", loc));
+            }
         }
     }
 
@@ -110,5 +119,59 @@ pub fn evaluate_gate_with_probes(
         claude_loc: edge.loc,
         claude_colo: edge.colo,
         elapsed_ms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn make_probe(ip: &str, loc: Option<&str>, reachable: bool) -> ChannelProbe {
+        ChannelProbe {
+            ip: ip.to_string(),
+            latency_ms: Some(120),
+            colo: Some("LAX".to_string()),
+            loc: loc.map(String::from),
+            tls: Some("TLSv1.3".to_string()),
+            http: Some("http/2".to_string()),
+            warp: Some("off".to_string()),
+            reachable,
+        }
+    }
+
+    #[test]
+    fn evaluate_gate_blocks_banned_edge_and_tun_regions() {
+        let mut cfg = ShieldConfig::from_home(PathBuf::from("/tmp/nonexistent-gate-test"));
+        cfg.expected_ip = "45.77.12.34".to_string();
+
+        let ok = evaluate_gate_with_probes(
+            &cfg,
+            make_probe("45.77.12.34", Some("US"), true),
+            make_probe("45.77.12.34", Some("US"), true),
+            make_probe("45.77.12.34", Some("US"), true),
+            88,
+        );
+        assert!(ok.ok);
+
+        let hk_edge = evaluate_gate_with_probes(
+            &cfg,
+            make_probe("45.77.12.34", Some("HK"), true),
+            make_probe("45.77.12.34", Some("US"), true),
+            make_probe("45.77.12.34", Some("HK"), true),
+            90,
+        );
+        assert!(!hk_edge.ok);
+        assert!(hk_edge.error.as_deref().unwrap_or("").contains("HK"));
+
+        let cn_tun = evaluate_gate_with_probes(
+            &cfg,
+            make_probe("45.77.12.34", Some("US"), true),
+            make_probe("45.77.12.34", Some("CN"), true),
+            make_probe("45.77.12.34", Some("US"), true),
+            92,
+        );
+        assert!(!cn_tun.ok);
+        assert!(cn_tun.error.as_deref().unwrap_or("").contains("CN"));
     }
 }

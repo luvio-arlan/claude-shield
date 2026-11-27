@@ -79,12 +79,14 @@ pub async fn run_daily_patrol(cfg: &ShieldConfig, notify: bool, auto_kill: bool)
 
     let desktop_unprotected = defenses.desktop_pid.is_some()
         && (!defenses.desktop_proxy_bound
+            || !defenses.desktop_bypass_locked
             || !defenses.desktop_quic_disabled
             || !defenses.desktop_webrtc_locked);
     let mut desktop_killed = false;
+    let mut all_cli_killed = false;
 
     if desktop_unprotected {
-        alerts.push("发现未绑定硬代理或未封闭 QUIC/WebRTC 的 Claude 桌面版进程！".to_string());
+        alerts.push("发现未绑定硬代理或未封闭 Bypass/QUIC/WebRTC 的 Claude 桌面版进程！".to_string());
         if auto_kill {
             kill_claude_desktop();
             desktop_killed = true;
@@ -102,15 +104,30 @@ pub async fn run_daily_patrol(cfg: &ShieldConfig, notify: bool, auto_kill: bool)
         }
     }
 
-    if auto_kill
-        && !desktop_killed
-        && defenses.desktop_pid.is_some()
-        && (!purity.dual_channel_match || !purity.region_supported)
-    {
-        kill_claude_desktop();
-        auto_healed.push("巡检发现 IP 异常，已自动急停 Claude 桌面版防裸连".to_string());
+    let critical_network_breach = !purity.dual_channel_match
+        || !purity.claude_edge_match
+        || !purity.region_supported
+        || purity.dns_leak
+        || purity.ipv6_leak;
+
+    if auto_kill && critical_network_breach {
+        if !desktop_killed && defenses.desktop_pid.is_some() {
+            kill_claude_desktop();
+            auto_healed.push("巡检发现出口/防泄露高危异常，已自动急停 Claude 桌面版防裸连".to_string());
+        }
+        if !defenses.active_cli_pids.is_empty() && !all_cli_killed {
+            let killed = kill_pids(&defenses.active_cli_pids);
+            all_cli_killed = true;
+            if killed > 0 {
+                auto_healed.push(format!(
+                    "巡检发现出口/防泄露高危异常，已自动终止 {} 个运行中的 Claude Code 进程",
+                    killed
+                ));
+            }
+        }
     }
 
+    let _ = all_cli_killed;
     let passed = alerts.is_empty();
 
     let report = PatrolReport {

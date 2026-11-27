@@ -2,6 +2,54 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
+
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp {
+    mtime: Option<SystemTime>,
+    len: u64,
+}
+
+fn file_stamp(path: &Path) -> FileStamp {
+    match fs::metadata(path) {
+        Ok(m) => FileStamp {
+            mtime: m.modified().ok(),
+            len: m.len(),
+        },
+        Err(_) => FileStamp { mtime: None, len: 0 },
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigStamps {
+    home_dir: PathBuf,
+    expected_ip: FileStamp,
+    proxy_port: FileStamp,
+    target_tz: FileStamp,
+    hide_original: FileStamp,
+}
+
+impl ConfigStamps {
+    fn capture(home_dir: &Path) -> Self {
+        let dir = home_dir.join(".config/claude-guard");
+        Self {
+            home_dir: home_dir.to_path_buf(),
+            expected_ip: file_stamp(&dir.join("expected_ip")),
+            proxy_port: file_stamp(&dir.join("proxy_port")),
+            target_tz: file_stamp(&dir.join("target_tz")),
+            hide_original: file_stamp(&dir.join("hide_original")),
+        }
+    }
+}
+
+struct CachedConfigEntry {
+    stamps: ConfigStamps,
+    cfg: ShieldConfig,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShieldConfig {
@@ -21,6 +69,32 @@ impl ShieldConfig {
         Self::from_home(home_dir)
     }
 
+    /// Mtime-cached configuration loader for hot 3-15s telemetry/defense ticks.
+    /// Re-reads disk immediately whenever any of the 4 config files changes.
+    pub fn load_cached() -> Self {
+        static CACHE: OnceLock<Mutex<Option<CachedConfigEntry>>> = OnceLock::new();
+        let home_dir = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/Users/Shared"));
+        let stamps = ConfigStamps::capture(&home_dir);
+        let cache = CACHE.get_or_init(|| Mutex::new(None));
+        if let Ok(guard) = cache.lock() {
+            if let Some(ref entry) = *guard {
+                if entry.stamps == stamps {
+                    return entry.cfg.clone();
+                }
+            }
+        }
+        let cfg = Self::from_home(home_dir);
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some(CachedConfigEntry {
+                stamps,
+                cfg: cfg.clone(),
+            });
+        }
+        cfg
+    }
+
     pub fn from_home(home_dir: PathBuf) -> Self {
         let config_dir = home_dir.join(".config/claude-guard");
 
@@ -28,6 +102,7 @@ impl ShieldConfig {
             .unwrap_or_else(|| "未配置".to_string());
         let proxy_port = read_trimmed(&config_dir.join("proxy_port"))
             .and_then(|s| s.parse::<u16>().ok())
+            .filter(|&p| p > 0)
             .unwrap_or(7897);
         let target_tz = read_trimmed(&config_dir.join("target_tz"))
             .filter(|s| !s.is_empty())
@@ -58,13 +133,23 @@ impl ShieldConfig {
         !self.expected_ip.is_empty() && self.expected_ip != "未配置"
     }
 
+    fn unique_tmp_path(&self, name: &str) -> PathBuf {
+        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        self.config_dir
+            .join(format!(".{}.{}.{}.tmp", name, std::process::id(), seq))
+    }
+
     pub fn write_cache_json<T: Serialize>(&self, name: &str, value: &T) {
         let _ = fs::create_dir_all(&self.config_dir);
         if let Ok(json) = serde_json::to_string_pretty(value) {
-            let tmp = self.config_dir.join(format!(".{}.tmp", name));
+            let tmp = self.unique_tmp_path(name);
             let dst = self.config_dir.join(name);
             if fs::write(&tmp, json).is_ok() {
-                let _ = fs::rename(tmp, dst);
+                if fs::rename(&tmp, &dst).is_err() {
+                    let _ = fs::remove_file(&tmp);
+                }
+            } else {
+                let _ = fs::remove_file(&tmp);
             }
         }
     }
@@ -92,9 +177,13 @@ impl ShieldConfig {
                 }
                 rotated.push_str(&line);
                 rotated.push('\n');
-                let tmp = self.config_dir.join(format!(".{}.tmp", name));
+                let tmp = self.unique_tmp_path(name);
                 if fs::write(&tmp, rotated).is_ok() {
-                    let _ = fs::rename(tmp, &dst);
+                    if fs::rename(&tmp, &dst).is_err() {
+                        let _ = fs::remove_file(&tmp);
+                    }
+                } else {
+                    let _ = fs::remove_file(&tmp);
                 }
                 return;
             }

@@ -183,6 +183,15 @@ extension ShieldDashboardView {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4.5)
                     .background(Capsule().fill(titaniumAccent.opacity(isDark ? 0.18 : 0.11)))
+                Button(action: { vm.dismissUpdateError() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(labelColor)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(SnappyButtonStyle(scale: 0.92))
+                .help("关闭错误提示")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)

@@ -6,6 +6,10 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private static let reopenNotification = Notification.Name("com.local.claude.shield.launchDesktop")
+    private static let statusTitleAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .medium),
+        .baselineOffset: 0.2
+    ]
 
     private var statusItem: NSStatusItem!
     private var popover: NSPopover?
@@ -123,6 +127,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             let gradeText = purity.map { " · \($0.grade)" } ?? ""
             let baseKey = "\(snap.region_short)\(gradeText)"
             updateStatusButton(state: .armed, text: "\(snap.region_short)\(msText)\(gradeText)", baseKey: baseKey, latencyMs: bestMs)
+        } else if snap.regionBanned {
+            updateStatusButton(state: .alert, text: "地区封禁!", baseKey: "alert-region", latencyMs: nil)
         } else if snap.desktopUnprotected || snap.hasUnprotectedCLI {
             updateStatusButton(state: .alert, text: "进程未受保护!", baseKey: "alert-proc", latencyMs: nil)
         } else {
@@ -213,17 +219,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return
         }
         guard let button = statusItem.button else { return }
+        let stateChanged = lastStatusState != state
         lastStatusState = state
         lastStatusText = text
         lastStatusBaseKey = baseKey
         lastStatusLatencyMs = latencyMs
-        button.image = ShieldBrandGraphics.makeMenuBarIcon(state: state)
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .medium)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .baselineOffset: 0.2
-        ]
-        button.attributedTitle = NSAttributedString(string: " \(text)", attributes: attrs)
+        if stateChanged || button.image == nil {
+            button.image = ShieldBrandGraphics.makeMenuBarIcon(state: state)
+        }
+        button.attributedTitle = NSAttributedString(string: " \(text)", attributes: Self.statusTitleAttrs)
     }
 
     private func showPopoverNow() {

@@ -1,14 +1,14 @@
 ---
 name: claude-shield
 description: >-
-  macOS 原生轻量级 Claude Shield v3.6 防封安全套件（单进程内嵌 Rust FFI 核心 + SwiftUI 状态栏雷达 & Studio 控制台，零虚拟机损耗）全套配置指南与自动化部署工作流。
+  macOS 原生轻量级 Claude Shield v3.7 防封安全套件（单进程内嵌 Rust FFI 核心 + SwiftUI 状态栏雷达 & Studio 控制台，零虚拟机损耗）全套配置指南与自动化部署工作流。
   覆盖 AdsPower 指纹浏览器隔离、Clash Verge Rev (TUN + Fake-IP + 防 DNS/IPv6 泄露) 三点 IP 门禁锁、
   ip.net.coffee 级多源 IP 纯净度体检、Claude Code CLI 与 Claude Desktop 硬代理绑定、原版图标彻底隐藏防误触、
   开机自启雷达、每日安全巡检、睡眠唤醒瞬间急停、OAuth 强制拦截以及官方 macOS Seatbelt 沙盒。
   当用户需要配置 Claude Code / Claude 桌面版防封号、隔离多环境、检测 IP 纯净度或防止误裸连国内 IP 时激活。
 ---
 
-# Claude Shield v3.6 — macOS 原生轻量防封安全套件（单进程 Rust FFI + SwiftUI）
+# Claude Shield v3.7 — macOS 原生轻量防封安全套件（单进程 Rust FFI + SwiftUI）
 
 一套 **0 虚拟机内存损耗、Rust 极速内核、100% 原生速度** 的 macOS 防封隔离架构，同时守护 **网页端（AdsPower）+ 终端（Claude Code）+ 桌面端（Claude Desktop）** 三端闭环，内置 **`ip.net.coffee/claude` 级多源 IP 纯净度引擎**、**独立 Studio 控制台**、**开机自启雷达** 与 **每日安全巡检**。
 
@@ -26,7 +26,7 @@ description: >-
 | **⑥ 唤醒 & 切网瞬间急停（Fail-Closed）** | 监听 macOS `didWakeNotification` 与 `NWPathMonitor`，休眠唤醒或切网瞬间立即复检；发现 IP 漂移或未受保护进程（含桌面版与裸奔 CLI）0 秒自动急停 | MacBook 合盖唤醒瞬间代理尚未接管导致后台裸连 |
 | **⑦ 进程级时区/语言对齐 + 零遥测沙盒** | 核对 `target_tz` 与出口 IP 真实时区，注入 `TZ`、`en_US.UTF-8`，开启 `~/.claude/settings.json` Seatbelt 沙盒并关闭所有遥测与后台自动更新 | IP 与客户端时区打架、Agent 越权或多余遥测外联 |
 | **⑧ 开机自启雷达 + 每日巡检守护** | 自动部署 LaunchAgents：登录静默启动状态栏雷达（UI 内可一键开关）+ 每日定时纯净度与防线巡检（异常时推送 macOS 通知） | 重启忘开防护或节点纯净度悄悄退化 |
-| **⑨ Studio 控制台 & 状态栏雷达（v3.5）** | 单进程静态链接 Rust FFI（零子进程/零 IPC）、Clash Verge Rev / Mihomo 内核 `kqueue` 实时事件监听（切节点/关 TUN 毫秒级熔断）、Apple Silicon 能效核调度 + 低电量自适应 + 状态栏重绘防抖、可选内核级 `pf-guard` 防 IPv6/QUIC 物理泄露锚点、后台 0% CPU 自动卸载隐藏视图 | 后台动画空转耗电、双进程开销、切节点盲区、冷建连测速虚高 |
+| **⑨ Studio 控制台 & 状态栏雷达（v3.7）** | 单进程静态链接 Rust FFI（非阻塞并发任务 + 零拷贝解码）、先验 IP 再触碰 `api.anthropic.com` 零泄露测速、息屏不失明事件守护、桌面版 + 原生 CLI 全谱系审计与急停、Clash Verge Rev / Mihomo 内核 `kqueue` + `/proxies` 实时节点指纹监听、动态 `utun1024` + WebRTC 内核 `pf-guard`、严格 Fail-Closed SHA-256 更新器 | 切节点/唤醒瞬间静默泄露、息屏漏监、CLI 裸奔、后台待机耗电与冷建连测速虚高 |
 
 ---
 

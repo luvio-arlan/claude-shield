@@ -190,7 +190,11 @@ extension ShieldDashboardView {
                     dashboardMetricTile(
                         icon: "terminal.fill",
                         title: "Claude Code",
-                        value: vm.snapshot.hasUnprotectedCLI ? "未保护进程!" : (d.cli_ready ? "Rust 门禁就绪" : "待初始化"),
+                        value: vm.snapshot.hasUnprotectedCLI
+                            ? "未保护进程!"
+                            : (vm.snapshot.hasActiveCLI
+                                ? "守护中 · \(d.activeCLIPIDs.count) 进程"
+                                : (d.cli_ready ? "Rust 门禁就绪" : "待初始化")),
                         ok: d.cli_ready && !vm.snapshot.hasUnprotectedCLI
                     )
                 }
@@ -220,15 +224,15 @@ extension ShieldDashboardView {
                 }
             }
 
-            if vm.snapshot.desktopRunning {
+            if vm.snapshot.anyClaudeRunning {
                 dashboardActionTile(
                     icon: "stop.circle.fill",
-                    title: "急停 Claude 桌面版",
+                    title: vm.snapshot.hasActiveCLI ? "急停全部 Claude 进程（桌面版 + CLI）" : "急停 Claude 桌面版",
                     isLoading: false,
                     tint: dangerRed,
                     isDestructive: true
                 ) {
-                    vm.emergencyKillClaude()
+                    vm.emergencyKillClaude(includeCLI: true)
                 }
             }
         }

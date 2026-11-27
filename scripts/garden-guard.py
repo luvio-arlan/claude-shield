@@ -143,6 +143,27 @@ def check_swift_guardrails(errors: list[str]) -> None:
                     "Fail closed (`try await` + throw UpdateError.checksumVerificationFailed) when SHA256SUMS.txt cannot be verified.",
                 )
             )
+        if re.search(r"\bif\s+let\s+sumURL\s*=\s*info\.checksumURL\b", updater_text) or "missingChecksumAsset" not in updater_text:
+            errors.append(
+                fail(
+                    "UPDATER_REQUIRE_CHECKSUM",
+                    "app/Sources/Updater.swift allows skipping SHA-256 verification when checksumURL is absent.",
+                    "Use `guard let sumURL = info.checksumURL else { throw UpdateError.missingChecksumAsset }` so updates always fail closed.",
+                )
+            )
+
+    vm_path = APP_SOURCES_DIR / "ShieldViewModel.swift"
+    if vm_path.exists():
+        vm_text = vm_path.read_text(encoding="utf-8")
+        screen_sleep_match = re.search(r"screensDidSleepNotification.*?workspaceObservers\s*=", vm_text, re.S)
+        if screen_sleep_match and "isSystemAsleep = true" in screen_sleep_match.group(0):
+            errors.append(
+                fail(
+                    "NO_SCREEN_SLEEP_BLINDING",
+                    "screensDidSleepNotification sets `isSystemAsleep = true` in ShieldViewModel.swift.",
+                    "Track screen lock/dim via `isScreenOff` and reserve `isSystemAsleep` strictly for `willSleepNotification` so background Claude sessions stay guarded while the display is off.",
+                )
+            )
 
     required_patterns = [
         ("NSPopoverDelegate", "POPOVER_ANTI_FLICKER", "AppDelegate must conform to NSPopoverDelegate and track lastPopoverClosedAt."),
@@ -198,6 +219,21 @@ def check_rust_guardrails(errors: list[str]) -> None:
                     "Configure `.http2_keep_alive_interval(...)` and `.http2_keep_alive_while_idle(true)` so pooled sockets never silently drop and spike latency.",
                 )
             )
+    probe_pool_rs = ROOT / "core" / "src" / "probe_pool.rs"
+    if probe_pool_rs.exists():
+        pool_text = probe_pool_rs.read_text(encoding="utf-8")
+        cycle_parts = pool_text.split("fn run_telemetry_cycle", 1)
+        cycle_body = cycle_parts[1] if len(cycle_parts) == 2 else pool_text
+        gate_idx = cycle_body.find("is_safe_to_probe_anthropic_api(")
+        warmup_idx = cycle_body.find("warmup_anthropic_api(")
+        if gate_idx == -1 or (warmup_idx != -1 and warmup_idx < gate_idx):
+            errors.append(
+                fail(
+                    "NO_PRE_GATE_API_WARMUP",
+                    "core/src/probe_pool.rs calls `warmup_anthropic_api` before verifying `is_safe_to_probe_anthropic_api` in `run_telemetry_cycle`.",
+                    "Never connect to api.anthropic.com until Phase 1 verifies whitelisted Proxy + TUN exit IP and compliant region.",
+                )
+            )
     for path in rust_files():
         rel = path.relative_to(ROOT).as_posix()
         text = path.read_text(encoding="utf-8")
@@ -238,6 +274,8 @@ def check_rust_swift_dto_parity(errors: list[str]) -> None:
         ("ChannelProbe", "ChannelProbeModel"),
         ("ApiLatencyMetrics", "ApiLatencyModel"),
         ("LocalDefenseAudit", "LocalDefenseModel"),
+        ("LaunchDesktopOutcome", "LaunchDesktopOutcomeModel"),
+        ("KillOutcome", "KillOutcomeModel"),
         ("TelemetryJson", "TelemetrySnapshot"),
         ("RiskFactor", "RiskFactorModel"),
         ("DnsProbeInfo", "DnsProbeModel"),

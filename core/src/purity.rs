@@ -1,10 +1,19 @@
 use crate::config::ShieldConfig;
-use crate::probe::{build_direct_v4_client, build_direct_v6_client, build_proxy_client, is_valid_ip_str, probe_trace_channel};
-use crate::purity_score::{evaluate_purity_score, is_dns_leaked, is_region_supported, timezones_match, PuritySignals};
+use crate::probe::{
+    build_direct_v4_client, build_direct_v6_client, build_proxy_client, is_valid_ip_str,
+    parse_cf_trace, probe_trace_channel,
+};
+use crate::purity_score::{
+    evaluate_purity_score, is_dns_leaked, is_region_supported, timezones_match, PuritySignals,
+};
 use chrono::Local;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static EDNS_NONCE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskFactor {
@@ -75,8 +84,23 @@ async fn fetch_json(client: &Client, url: &str) -> Option<Value> {
     resp.json::<Value>().await.ok()
 }
 
+fn fresh_edns_url() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let seq = EDNS_NONCE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mixed = nanos.wrapping_mul(6364136223846793005) ^ seq.wrapping_add(0x9e3779b97f4a7c15);
+    format!("http://{mixed:016x}.edns.ip-api.com/json")
+}
+
 async fn probe_edns(client: &Client) -> DnsProbeInfo {
-    if let Some(v) = fetch_json(client, "http://edns.ip-api.com/json").await {
+    let random_url = fresh_edns_url();
+    let val = match fetch_json(client, &random_url).await {
+        Some(v) => Some(v),
+        None => fetch_json(client, "http://edns.ip-api.com/json").await,
+    };
+    if let Some(v) = val {
         let ip = v.pointer("/dns/ip").and_then(|x| x.as_str()).map(String::from);
         let geo = v.pointer("/dns/geo").and_then(|x| x.as_str()).map(String::from);
         let leaked = geo.as_deref().map(is_dns_leaked).unwrap_or(false);
@@ -89,20 +113,45 @@ async fn probe_edns(client: &Client) -> DnsProbeInfo {
     }
 }
 
+async fn probe_ipv6_cf(client: &Client) -> Option<String> {
+    let resp = client
+        .get("https://[2606:4700:4700::1111]/cdn-cgi/trace")
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.text().await.ok()?;
+    let trace = parse_cf_trace(&body);
+    if trace.ip.contains(':') && is_valid_ip_str(&trace.ip) {
+        Some(trace.ip)
+    } else {
+        None
+    }
+}
+
+async fn probe_ipv6_ipify(client: &Client) -> Option<String> {
+    let resp = client.get("https://api6.ipify.org").send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let ip = resp.text().await.ok()?.trim().to_string();
+    if ip.contains(':') && is_valid_ip_str(&ip) {
+        Some(ip)
+    } else {
+        None
+    }
+}
+
 async fn probe_ipv6_leak() -> (bool, Option<String>) {
     let client = match build_direct_v6_client(2) {
         Ok(c) => c,
         Err(_) => return (false, None),
     };
-    if let Ok(resp) = client.get("https://api6.ipify.org").send().await {
-        if resp.status().is_success() {
-            if let Ok(text) = resp.text().await {
-                let ip = text.trim().to_string();
-                if ip.contains(':') && is_valid_ip_str(&ip) {
-                    return (true, Some(ip));
-                }
-            }
-        }
+    let (cf_ip, ipify_ip) = tokio::join!(probe_ipv6_cf(&client), probe_ipv6_ipify(&client));
+    if let Some(ip) = cf_ip.or(ipify_ip) {
+        return (true, Some(ip));
     }
     (false, None)
 }

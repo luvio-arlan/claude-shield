@@ -1,7 +1,10 @@
 use claude_shield_core::config::ShieldConfig;
-use claude_shield_core::detect::detect_environment;
+use claude_shield_core::detect::{
+    detect_environment, find_real_claude_cli, is_shield_managed_wrapper,
+};
 use claude_shield_core::guard::{
-    audit_local_defenses, escape_applescript, hide_original_claude_app, kill_claude_desktop,
+    apply_hardened_env, audit_local_defenses, escape_applescript, hide_original_claude_app,
+    spawn_hardened_claude_desktop,
 };
 use claude_shield_core::patrol::{self, run_daily_patrol};
 use claude_shield_core::pf_guard::{
@@ -16,7 +19,7 @@ use claude_shield_core::{build_telemetry_payload, evaluate_gate_with_probes, Gat
 use std::env;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -324,46 +327,6 @@ fn print_patrol_human(report: &patrol::PatrolReport) {
     }
 }
 
-fn apply_hardened_env(cmd: &mut Command, cfg: &ShieldConfig) {
-    let http = cfg.proxy_http_url();
-    let socks = cfg.proxy_socks_url();
-    let guard_bin = cfg.home_dir.join(".local/lib/claude-guard-bin");
-    let orig_path = env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}:{}", guard_bin.display(), orig_path);
-
-    let existing_node_opts = env::var("NODE_OPTIONS").unwrap_or_default();
-    let node_opts = if existing_node_opts.contains("--dns-result-order=") {
-        existing_node_opts
-    } else if existing_node_opts.is_empty() {
-        "--dns-result-order=ipv4first".to_string()
-    } else {
-        format!("{} --dns-result-order=ipv4first", existing_node_opts)
-    };
-
-    cmd.env("TZ", &cfg.target_tz)
-        .env("LANG", "en_US.UTF-8")
-        .env("LC_ALL", "en_US.UTF-8")
-        .env("HTTP_PROXY", &http)
-        .env("HTTPS_PROXY", &http)
-        .env("ALL_PROXY", &socks)
-        .env("http_proxy", &http)
-        .env("https_proxy", &http)
-        .env("all_proxy", &socks)
-        .env("NO_PROXY", "localhost,127.0.0.1,::1")
-        .env("no_proxy", "localhost,127.0.0.1,::1")
-        .env("NODE_OPTIONS", node_opts)
-        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-        .env("CLAUDE_CODE_ENABLE_TELEMETRY", "0")
-        .env("DISABLE_TELEMETRY", "1")
-        .env("DISABLE_ERROR_REPORTING", "1")
-        .env("DISABLE_BUG_COMMAND", "1")
-        .env("DISABLE_AUTOUPDATER", "1")
-        .env("OTEL_SDK_DISABLED", "1")
-        .env("DO_NOT_TRACK", "1")
-        .env("PATH", new_path)
-        .env("BROWSER", guard_bin.join("open"));
-}
-
 async fn cmd_exec_cli(cfg: &ShieldConfig, real_bin: &str, pass_args: &[String]) {
     let gate = evaluate_gate(cfg).await;
     if !gate.ok {
@@ -373,6 +336,26 @@ async fn cmd_exec_cli(cfg: &ShieldConfig, real_bin: &str, pass_args: &[String]) 
         );
         std::process::exit(1);
     }
+
+    // Prevent wrapper self-recursion if PATH resolution ever points back to ~/.local/bin/claude
+    let wrapper_self = cfg.home_dir.join(".local/bin/claude");
+    let target_path = Path::new(real_bin);
+    let points_to_self = is_shield_managed_wrapper(target_path)
+        || (std::fs::canonicalize(target_path).ok() == std::fs::canonicalize(&wrapper_self).ok()
+            && wrapper_self.exists());
+    let resolved_bin = if points_to_self {
+        match find_real_claude_cli(&cfg.home_dir) {
+            Some(found) => found,
+            None => {
+                eprintln!(
+                    "\x1b[1;31m[Claude Shield]\x1b[0m 检测到 CLI 包装器指向自身且未找到真实 claude 二进制，已中止防死循环。"
+                );
+                std::process::exit(127);
+            }
+        }
+    } else {
+        real_bin.to_string()
+    };
 
     eprintln!(
         "\x1b[0;32m[Claude Shield v{}]\x1b[0m ✅ IP={} ({}) | TZ={} | Proxy=127.0.0.1:{} | Gate={}ms | IPv4-Only",
@@ -384,20 +367,16 @@ async fn cmd_exec_cli(cfg: &ShieldConfig, real_bin: &str, pass_args: &[String]) 
         gate.elapsed_ms
     );
 
-    let mut cmd = Command::new(real_bin);
+    let mut cmd = Command::new(&resolved_bin);
     cmd.args(pass_args);
     apply_hardened_env(&mut cmd, cfg);
 
     let err = cmd.exec();
-    eprintln!("\x1b[1;31m[Claude Shield]\x1b[0m 无法执行 {}: {}", real_bin, err);
+    eprintln!("\x1b[1;31m[Claude Shield]\x1b[0m 无法执行 {}: {}", resolved_bin, err);
     std::process::exit(127);
 }
 
 async fn cmd_launch_desktop(cfg: &ShieldConfig, force: bool) {
-    if cfg.hide_original && Path::new("/Applications/Claude.app").exists() {
-        hide_original_claude_app(cfg);
-    }
-
     let mut verified_ip: Option<String> = None;
     if !force {
         let gate = evaluate_gate(cfg).await;
@@ -419,80 +398,24 @@ async fn cmd_launch_desktop(cfg: &ShieldConfig, force: bool) {
         }
     }
 
-    let vault_app = cfg.home_dir.join(".local/apps/Claude.app");
-    let app_path = if vault_app.exists() {
-        vault_app
-    } else if Path::new("/Applications/Claude.app").exists() {
-        Path::new("/Applications/Claude.app").to_path_buf()
-    } else {
+    let outcome = spawn_hardened_claude_desktop(cfg, verified_ip.as_deref());
+    if !outcome.ok {
+        let safe_msg = escape_applescript(&outcome.message);
+        let icon = if outcome.message.contains("未检测到 Claude 桌面版") {
+            "note"
+        } else {
+            "stop"
+        };
         let _ = Command::new("/usr/bin/osascript")
             .args([
                 "-e",
-                "display dialog \"未检测到 Claude 桌面版（Claude.app），请先安装 Claude Desktop。\" buttons {\"知道了\"} default button 1 with icon note with title \"Claude Shield\"",
+                &format!(
+                    "display dialog \"⚠️ {}\" buttons {{\"知道了\"}} default button 1 with icon {} with title \"Claude Shield\"",
+                    safe_msg, icon
+                ),
             ])
             .status();
-        std::process::exit(0);
-    };
-
-    let defenses = audit_local_defenses(cfg);
-    if defenses.desktop_pid.is_some() {
-        if defenses.desktop_proxy_bound && defenses.desktop_quic_disabled && defenses.desktop_webrtc_locked {
-            let _ = Command::new("/usr/bin/open")
-                .args(["-a", app_path.to_str().unwrap_or("/Applications/Claude.app")])
-                .status();
-            return;
-        } else {
-            kill_claude_desktop();
-            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-        }
-    }
-
-    if let Some(ip) = verified_ip {
-        let _ = std::fs::create_dir_all(&cfg.config_dir);
-        let _ = std::fs::write(cfg.config_dir.join("last_launch_ip"), format!("{}\n", ip));
-    }
-
-    let bin = app_path.join("Contents/MacOS/Claude");
-    let mut cmd = Command::new(&bin);
-    cmd.args([
-        &format!("--proxy-server=http://127.0.0.1:{}", cfg.proxy_port),
-        "--proxy-bypass-list=<-loopback>",
-        "--disable-quic",
-        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-        "--lang=en-US",
-    ]);
-    apply_hardened_env(&mut cmd, cfg);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    match cmd.spawn() {
-        Ok(mut child) => {
-            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-            if let Ok(Some(status)) = child.try_wait() {
-                let _ = Command::new("/usr/bin/osascript")
-                    .args([
-                        "-e",
-                        &format!(
-                            "display dialog \"⚠️ Claude 桌面版异常退出 (code: {:?})\" buttons {{\"知道了\"}} default button 1 with icon stop with title \"Claude Shield\"",
-                            status.code()
-                        ),
-                    ])
-                    .status();
-                std::process::exit(1);
-            }
-        }
-        Err(e) => {
-            let safe_err = escape_applescript(&e.to_string());
-            let _ = Command::new("/usr/bin/osascript")
-                .args([
-                    "-e",
-                    &format!(
-                        "display dialog \"⚠️ Claude 桌面版启动失败: {}\" buttons {{\"知道了\"}} default button 1 with icon stop with title \"Claude Shield\"",
-                        safe_err
-                    ),
-                ])
-                .status();
+        if icon == "stop" {
             std::process::exit(1);
         }
     }

@@ -3,7 +3,7 @@
 ## 1. Architecture Map
 
 - `core/src/` — Modular Native Rust engine (`claude_shield_core` staticlib + `claude-shield-core` CLI), every module `<= 800` lines:
-  - `lib.rs`, `main.rs`, `ffi.rs`, `config.rs`, `probe.rs`, `proc_audit.rs`, `worker.rs`, `guard.rs`, `pf_guard.rs`, `purity.rs`, `purity_score.rs`, `patrol.rs`, `detect.rs`, `setup.rs`, `uninstall.rs`.
+  - `lib.rs`, `main.rs`, `ffi.rs`, `config.rs`, `probe.rs`, `probe_pool.rs`, `latency.rs`, `proc_audit.rs`, `worker.rs`, `guard.rs`, `pf_guard.rs`, `purity.rs`, `purity_score.rs`, `patrol.rs`, `detect.rs`, `setup.rs`, `uninstall.rs`.
 - `app/Sources/` — Modular macOS 13+ SwiftUI + AppKit single-process client (static-linking `libclaude_shield_core.a` via `ClaudeShieldCore.h`), every file `<= 800` lines:
   - `ClaudeShieldCore.h`, `Models.swift`, `CoreWorkerClient.swift`, `KernelWatchers.swift`, `RustCoreBridge.swift`, `Updater.swift`, `ShieldViewModel.swift`, `ShieldViewModelActions.swift`, `ThemeAndComponents.swift`, `PopoverView.swift`, `PopoverSections.swift`, `LaunchGuardView.swift`, `DashboardState.swift`, `DashboardView.swift`, `DashboardRadarSection.swift`, `DashboardPuritySection.swift`, `DashboardSettingsSection.swift`, `AppDelegate.swift`, `main.swift`.
 - `scripts/check.sh` — **Single source of truth** quality gate (local + `.github/workflows/ci.yml`).

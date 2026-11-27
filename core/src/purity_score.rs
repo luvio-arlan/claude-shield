@@ -1,6 +1,7 @@
 use crate::purity::{DnsProbeInfo, RiskFactor};
 
-const BLOCKED_CLAUDE_REGIONS: &[&str] = &["CN", "HK", "MO", "RU", "BY", "KP", "IR", "SY", "CU"];
+pub const BLOCKED_CLAUDE_REGIONS: &[&str] =
+    &["CN", "HK", "MO", "RU", "BY", "KP", "IR", "SY", "CU", "VE"];
 
 const LEAKED_DNS_KEYWORDS: &[&str] = &[
     "china",
@@ -9,8 +10,11 @@ const LEAKED_DNS_KEYWORDS: &[&str] = &[
     "macau",
     "chinanet",
     "china telecom",
+    "chinatelecom",
     "china unicom",
+    "chinaunicom",
     "china mobile",
+    "chinamobile",
     "alidns",
     "alibaba",
     "tencent",
@@ -19,6 +23,13 @@ const LEAKED_DNS_KEYWORDS: &[&str] = &[
     "114dns",
     "cernet",
     "cstnet",
+    "cnnic",
+    "hkbn",
+    "pccw",
+    "hkt",
+    "ctm",
+    "bytedance",
+    "huawei cloud",
 ];
 
 pub(crate) fn is_dns_leaked(geo: &str) -> bool {
@@ -26,8 +37,9 @@ pub(crate) fn is_dns_leaked(geo: &str) -> bool {
     LEAKED_DNS_KEYWORDS.iter().any(|k| lower.contains(k))
 }
 
-pub(crate) fn is_region_supported(country_code: &str) -> bool {
-    !BLOCKED_CLAUDE_REGIONS.contains(&country_code) && country_code != "??"
+pub fn is_region_supported(country_code: &str) -> bool {
+    let upper = country_code.trim().to_ascii_uppercase();
+    !upper.is_empty() && upper != "??" && !BLOCKED_CLAUDE_REGIONS.contains(&upper.as_str())
 }
 
 pub(crate) fn normalize_timezone(tz: &str) -> &str {
@@ -121,6 +133,11 @@ pub(crate) fn evaluate_purity_score(s: &PuritySignals<'_>) -> (u8, String, Strin
         });
     }
 
+    let dns_verified = s.dns_proxy.geo.is_some()
+        || s.dns_tun.geo.is_some()
+        || s.dns_proxy.ip.is_some()
+        || s.dns_tun.ip.is_some();
+
     if s.dns_leak {
         score -= 35;
         factors.push(RiskFactor {
@@ -133,6 +150,14 @@ pub(crate) fn evaluate_purity_score(s: &PuritySignals<'_>) -> (u8, String, Strin
             ),
             penalty: -35,
         });
+    } else if !dns_verified {
+        score -= 5;
+        factors.push(RiskFactor {
+            severity: "warn".to_string(),
+            title: "DNS 泄露检测未完成".to_string(),
+            detail: "EDNS 探测接口暂不可达，无法确认解析出口，请稍后复测".to_string(),
+            penalty: -5,
+        });
     } else {
         factors.push(RiskFactor {
             severity: "good".to_string(),
@@ -143,6 +168,8 @@ pub(crate) fn evaluate_purity_score(s: &PuritySignals<'_>) -> (u8, String, Strin
                     .geo
                     .as_deref()
                     .or(s.dns_proxy.geo.as_deref())
+                    .or(s.dns_tun.ip.as_deref())
+                    .or(s.dns_proxy.ip.as_deref())
                     .unwrap_or("海外加密 DNS")
             ),
             penalty: 0,
@@ -369,5 +396,16 @@ mod tests {
         let (f_score, f_grade, _, _) = evaluate_purity_score(&blocked);
         assert_eq!(f_grade, "F");
         assert_eq!(f_score, 0);
+
+        let unknown_dns = DnsProbeInfo {
+            ip: None,
+            geo: None,
+            leaked: false,
+        };
+        let mut unverified = base_signals(&unknown_dns);
+        unverified.dns_proxy = &unknown_dns;
+        unverified.dns_tun = &unknown_dns;
+        let (_, _, _, factors) = evaluate_purity_score(&unverified);
+        assert!(factors.iter().any(|f| f.severity == "warn" && f.title.contains("未完成")));
     }
 }

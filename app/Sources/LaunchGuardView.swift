@@ -461,7 +461,7 @@ final class LaunchGuardWindowController {
                         st.passedAndLaunching = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
                             self.dismiss()
-                            vm.executeDesktopLaunch(force: false, recordIP: fresh.currentIP)
+                            vm.executeDesktopLaunch(force: false, recordIP: fresh.currentIP, gateAlreadyPassed: true)
                         }
                     } else {
                         self.resizeAndCenter()

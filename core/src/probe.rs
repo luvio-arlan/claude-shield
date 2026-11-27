@@ -45,7 +45,7 @@ pub struct ApiLatencyMetrics {
 }
 
 impl ApiLatencyMetrics {
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             warm_rtt_ms: None,
             cold_connect_ms: None,
@@ -325,7 +325,7 @@ async fn calibrate_live_get_rtt(
 ///   instead 2 quick warm GETs bootstrap the tracker immediately.
 /// - On any suspect spike or sudden step drop, fires 1 immediate warm confirmation GET so isolated
 ///   reconnects / retransmits NEVER spike the UI while genuine route shifts snap instantly.
-async fn probe_trace_channel_live(
+pub(crate) async fn probe_trace_channel_live(
     client: &Client,
     primary_url: &str,
     assume_warm: bool,
@@ -396,12 +396,12 @@ async fn probe_trace_channel_live(
     ChannelProbe::unreachable()
 }
 
-struct ApiWarmupState {
-    cold_connect_ms: u64,
-    status_code: Option<u16>,
+pub(crate) struct ApiWarmupState {
+    pub(crate) cold_connect_ms: u64,
+    pub(crate) status_code: Option<u16>,
 }
 
-async fn warmup_anthropic_api(client: &Client) -> Option<ApiWarmupState> {
+pub(crate) async fn warmup_anthropic_api(client: &Client) -> Option<ApiWarmupState> {
     let (cold_connect_ms, status) = sample_warm_head_ms(client, API_PROBE_URL).await?;
     Some(ApiWarmupState {
         cold_connect_ms,
@@ -414,7 +414,7 @@ async fn warmup_anthropic_api(client: &Client) -> Option<ApiWarmupState> {
 ///   confirmation HEAD only when `needs_confirmation` detects a spike or sharp drop.
 /// - On cold start / empty tracker: warms first (never counting cold handshake as RTT) and takes
 ///   2 warm samples (live) or 4 warm samples (full burst) to populate the rolling window cleanly.
-async fn sample_anthropic_api_live(
+pub(crate) async fn sample_anthropic_api_live(
     client: &Client,
     warm: Option<ApiWarmupState>,
     already_warm: bool,
@@ -539,220 +539,13 @@ pub async fn quick_gate_probe(cfg: &ShieldConfig) -> (ChannelProbe, ChannelProbe
     }
 }
 
-fn is_connection_fresh(last_used: Option<Instant>, now: Instant) -> bool {
+pub(crate) fn is_connection_fresh(last_used: Option<Instant>, now: Instant) -> bool {
     last_used
         .map(|ts| now.saturating_duration_since(ts) < WARM_CONN_TTL)
         .unwrap_or(false)
 }
 
-/// Persistent HTTP/2 + TLS 1.3 connection pool shared across probes in worker / FFI mode.
-/// Keeps all three channels continuously warm via HTTP/2 PING frames and filters single-packet
-/// spikes / silent idle reconnects through per-channel rolling `ChannelRttTracker`s.
-pub struct ProbePool {
-    proxy_port: u16,
-    proxy_cf: Option<Client>,
-    proxy_api: Option<Client>,
-    direct_v4: Option<Client>,
-    last_cf_used: Option<Instant>,
-    last_tun_used: Option<Instant>,
-    last_api_used: Option<Instant>,
-    cf_tracker: ChannelRttTracker,
-    tun_tracker: ChannelRttTracker,
-    api_tracker: ChannelRttTracker,
-    last_api_warm: Option<ApiWarmupState>,
-}
-
-impl ProbePool {
-    pub fn new(cfg: &ShieldConfig) -> Self {
-        let mut pool = Self {
-            proxy_port: cfg.proxy_port,
-            proxy_cf: None,
-            proxy_api: None,
-            direct_v4: None,
-            last_cf_used: None,
-            last_tun_used: None,
-            last_api_used: None,
-            cf_tracker: ChannelRttTracker::new(),
-            tun_tracker: ChannelRttTracker::new(),
-            api_tracker: ChannelRttTracker::new(),
-            last_api_warm: None,
-        };
-        pool.ensure_clients(cfg, true);
-        pool
-    }
-
-    pub fn reset(&mut self, cfg: &ShieldConfig) {
-        self.ensure_clients(cfg, true);
-    }
-
-    fn ensure_clients(&mut self, cfg: &ShieldConfig, force_reset: bool) {
-        let port_changed = self.proxy_port != cfg.proxy_port;
-        if force_reset || port_changed || self.proxy_cf.is_none() || self.proxy_api.is_none() {
-            self.proxy_port = cfg.proxy_port;
-            self.proxy_cf = build_proxy_client(cfg, 6).ok();
-            self.proxy_api = build_proxy_client(cfg, 6).ok();
-            self.last_cf_used = None;
-            self.last_api_used = None;
-            self.last_api_warm = None;
-            if force_reset || port_changed {
-                self.cf_tracker.clear();
-                self.api_tracker.clear();
-            }
-        }
-        if force_reset || self.direct_v4.is_none() {
-            self.direct_v4 = build_direct_v4_client(6).ok();
-            self.last_tun_used = None;
-            if force_reset {
-                self.tun_tracker.clear();
-            }
-        }
-    }
-
-    async fn run_telemetry_cycle(
-        &mut self,
-        cfg: &ShieldConfig,
-        reset_pool: bool,
-        full_burst: bool,
-    ) -> NetworkProbeResult {
-        self.ensure_clients(cfg, reset_pool);
-        let now = Instant::now();
-        let cf_fresh = is_connection_fresh(self.last_cf_used, now);
-        let tun_fresh = is_connection_fresh(self.last_tun_used, now);
-        let api_fresh = self.last_api_warm.is_some() && is_connection_fresh(self.last_api_used, now);
-        let trace_burst = if full_burst { 2 } else { 1 };
-        let cf_tag = format!("proxy:{}", cfg.proxy_port);
-
-        let (claude_edge, tun, api_warm) = match (
-            self.proxy_cf.as_ref(),
-            self.proxy_api.as_ref(),
-            self.direct_v4.as_ref(),
-        ) {
-            (Some(pc_cf), Some(pc_api), Some(dc)) => {
-                let cf_tracker = &mut self.cf_tracker;
-                let tun_tracker = &mut self.tun_tracker;
-                let prev_api_warm = self.last_api_warm.as_ref().map(|w| ApiWarmupState {
-                    cold_connect_ms: w.cold_connect_ms,
-                    status_code: w.status_code,
-                });
-
-                tokio::join!(
-                    probe_trace_channel_live(
-                        pc_cf,
-                        "https://claude.ai/cdn-cgi/trace",
-                        cf_fresh,
-                        cf_tracker,
-                        &cf_tag,
-                        trace_burst,
-                    ),
-                    probe_trace_channel_live(
-                        dc,
-                        "https://1.1.1.1/cdn-cgi/trace",
-                        tun_fresh,
-                        tun_tracker,
-                        "tun",
-                        trace_burst,
-                    ),
-                    async {
-                        if api_fresh {
-                            prev_api_warm
-                        } else {
-                            warmup_anthropic_api(pc_api).await
-                        }
-                    }
-                )
-            }
-            _ => (ChannelProbe::unreachable(), ChannelProbe::unreachable(), None),
-        };
-
-        let phase1_done = Instant::now();
-        if claude_edge.reachable {
-            self.last_cf_used = Some(phase1_done);
-        } else {
-            self.last_cf_used = None;
-            self.cf_tracker.clear();
-        }
-        if tun.reachable {
-            self.last_tun_used = Some(phase1_done);
-        } else {
-            self.last_tun_used = None;
-            self.tun_tracker.clear();
-        }
-
-        // Phase 2: sample warmed HTTP/2 Anthropic API 1-RTT on a quiet proxy tunnel
-        let api_latency = if claude_edge.reachable
-            && (!cfg.is_ip_configured() || claude_edge.ip == cfg.expected_ip)
-        {
-            if let Some(pc_api) = self.proxy_api.as_ref() {
-                let api_identity = format!("{}|{}", claude_edge.ip, cfg.proxy_port);
-                self.api_tracker.sync_identity(&api_identity);
-                let (metrics, updated_warm) = sample_anthropic_api_live(
-                    pc_api,
-                    api_warm,
-                    api_fresh,
-                    full_burst,
-                    &mut self.api_tracker,
-                )
-                .await;
-                if metrics.warm_rtt_ms.is_some() {
-                    self.last_api_used = Some(Instant::now());
-                    self.last_api_warm = updated_warm;
-                } else {
-                    self.last_api_used = None;
-                    self.last_api_warm = None;
-                    self.api_tracker.clear();
-                }
-                metrics
-            } else {
-                ApiLatencyMetrics::empty()
-            }
-        } else {
-            self.last_api_used = None;
-            self.last_api_warm = None;
-            self.api_tracker.clear();
-            ApiLatencyMetrics::empty()
-        };
-
-        NetworkProbeResult {
-            proxy: claude_edge.clone(),
-            tun,
-            claude_edge,
-            api_latency,
-        }
-    }
-
-    /// Real-time live telemetry tick: 1 warm HTTP/2 RTT per channel (CF, TUN, Anthropic API)
-    /// with instant 1-shot confirmation on spikes/drops and automatic cold bootstrap.
-    pub async fn probe_light(&mut self, cfg: &ShieldConfig, reset_pool: bool) -> NetworkProbeResult {
-        self.run_telemetry_cycle(cfg, reset_pool, false).await
-    }
-
-    /// Full multi-sample recalibration burst for manual "重新测速" and CLI one-shot telemetry.
-    pub async fn probe_full(&mut self, cfg: &ShieldConfig, reset_pool: bool) -> NetworkProbeResult {
-        self.run_telemetry_cycle(cfg, reset_pool, true).await
-    }
-
-    pub async fn probe_gate(
-        &mut self,
-        cfg: &ShieldConfig,
-        reset_pool: bool,
-    ) -> (ChannelProbe, ChannelProbe, ChannelProbe) {
-        self.ensure_clients(cfg, reset_pool);
-        match (self.proxy_cf.as_ref(), self.direct_v4.as_ref()) {
-            (Some(pc), Some(dc)) => {
-                let (claude_edge, tun) = tokio::join!(
-                    probe_trace_channel(pc, "https://claude.ai/cdn-cgi/trace", false),
-                    probe_trace_channel(dc, "https://1.1.1.1/cdn-cgi/trace", false)
-                );
-                let proxy = claude_edge.clone();
-                (proxy, tun, claude_edge)
-            }
-            _ => {
-                let err = ChannelProbe::unreachable();
-                (err.clone(), err.clone(), err)
-            }
-        }
-    }
-}
+pub use crate::probe_pool::ProbePool;
 
 /// Full telemetry network probe for Menu Bar Radar (all channels + calibrated Anthropic API 1-RTT)
 pub async fn full_telemetry_probe(cfg: &ShieldConfig) -> NetworkProbeResult {

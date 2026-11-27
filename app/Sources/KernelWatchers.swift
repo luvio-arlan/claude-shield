@@ -127,11 +127,14 @@ final class MihomoEventMonitor: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.local.claude.shield.mihomo.monitor", qos: .background)
     private var watchers: [VnodeWatcher] = []
     private var controllerTimer: DispatchSourceTimer?
+    private var controllerSession: URLSession?
+    private var isPollingController = false
     private var lastControllerFingerprint: String?
     private var controllerEndpoint: (baseURL: String, secret: String?)?
     private var consecutiveControllerFailures: Int = 0
     private var onProxyStateChanged: (@Sendable (String) -> Void)?
     private var isActive = false
+    private var isPaused = false
 
     var hasRealtimeWatch: Bool {
         queue.sync { !watchers.isEmpty || controllerEndpoint != nil }
@@ -142,11 +145,13 @@ final class MihomoEventMonitor: @unchecked Sendable {
             stopLocked()
             self.onProxyStateChanged = onChange
             self.isActive = true
+            self.isPaused = false
 
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             let watchCandidates: [(String, TimeInterval)] = [
                 ("\(home)/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev", 0.35),
                 ("\(home)/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml", 0.30),
+                ("\(home)/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/verge.yaml", 0.30),
                 ("\(home)/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/cache.db", 0.35),
                 ("\(home)/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/profiles.yaml", 0.35),
                 ("\(home)/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/config.yaml", 0.35),
@@ -160,7 +165,7 @@ final class MihomoEventMonitor: @unchecked Sendable {
                 guard FileManager.default.fileExists(atPath: targetPath) else { continue }
                 let label = URL(fileURLWithPath: targetPath).lastPathComponent
                 let watcher = VnodeWatcher(path: targetPath, debounceInterval: debounce, queue: queue) { [weak self] in
-                    guard let self, self.isActive else { return }
+                    guard let self, self.isActive, !self.isPaused else { return }
                     self.consecutiveControllerFailures = 0
                     self.refreshControllerDiscoveryLocked()
                     self.startControllerLoopLocked()
@@ -176,6 +181,22 @@ final class MihomoEventMonitor: @unchecked Sendable {
         }
     }
 
+    func setPaused(_ paused: Bool) {
+        queue.async { [weak self] in
+            guard let self, self.isActive else { return }
+            guard self.isPaused != paused else { return }
+            self.isPaused = paused
+            if paused {
+                self.controllerTimer?.cancel()
+                self.controllerTimer = nil
+            } else {
+                self.consecutiveControllerFailures = 0
+                self.refreshControllerDiscoveryLocked()
+                self.startControllerLoopLocked()
+            }
+        }
+    }
+
     func stop() {
         queue.sync {
             stopLocked()
@@ -184,18 +205,48 @@ final class MihomoEventMonitor: @unchecked Sendable {
 
     deinit {
         controllerTimer?.cancel()
+        controllerSession?.invalidateAndCancel()
         for w in watchers { w.stop() }
     }
 
     private func stopLocked() {
         isActive = false
+        isPaused = false
+        isPollingController = false
         controllerTimer?.cancel()
         controllerTimer = nil
+        controllerSession?.invalidateAndCancel()
+        controllerSession = nil
         for w in watchers { w.stop() }
         watchers.removeAll()
         controllerEndpoint = nil
         lastControllerFingerprint = nil
         consecutiveControllerFailures = 0
+    }
+
+    private func ensureControllerSessionLocked() -> URLSession {
+        if let existing = controllerSession {
+            return existing
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 0.8
+        config.timeoutIntervalForResource = 1.2
+        config.connectionProxyDictionary = [:] // Strictly direct loopback, never proxied
+        let session = URLSession(configuration: config)
+        controllerSession = session
+        return session
+    }
+
+    private static func stripYamlScalar(_ raw: Substring) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return "" }
+        if let quote = trimmed.first, (quote == "\"" || quote == "'"), trimmed.count >= 2 {
+            if let endIdx = trimmed.dropFirst().firstIndex(of: quote) {
+                return String(trimmed[trimmed.index(after: trimmed.startIndex)..<endIdx])
+            }
+        }
+        let withoutComment = trimmed.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first ?? Substring(trimmed)
+        return withoutComment.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: "'\"")))
     }
 
     private func refreshControllerDiscoveryLocked() {
@@ -213,21 +264,19 @@ final class MihomoEventMonitor: @unchecked Sendable {
             guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
             var sawExplicitEmptyController = false
             for rawLine in text.split(separator: "\n", omittingEmptySubsequences: true) {
-                let line = rawLine.trimmingCharacters(in: .whitespaces)
-                if line.hasPrefix("external-controller:") {
-                    let rawVal = line
-                        .dropFirst("external-controller:".count)
-                        .trimmingCharacters(in: .whitespaces)
-                    let val = rawVal.trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+                // Only match top-level YAML keys (zero leading indentation) so nested proxy `secret:` keys never collide
+                guard let firstChar = rawLine.first, firstChar != " ", firstChar != "\t", firstChar != "#" else {
+                    continue
+                }
+                if rawLine.hasPrefix("external-controller:") {
+                    let val = Self.stripYamlScalar(rawLine.dropFirst("external-controller:".count))
                     if val.isEmpty {
                         sawExplicitEmptyController = true
                     } else if foundHostPort == nil {
                         foundHostPort = val
                     }
-                } else if line.hasPrefix("secret:") && foundSecret == nil {
-                    let val = line
-                        .dropFirst("secret:".count)
-                        .trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: "'\"")))
+                } else if rawLine.hasPrefix("secret:") && foundSecret == nil {
+                    let val = Self.stripYamlScalar(rawLine.dropFirst("secret:".count))
                     if !val.isEmpty {
                         foundSecret = val
                     }
@@ -250,66 +299,103 @@ final class MihomoEventMonitor: @unchecked Sendable {
     private func startControllerLoopLocked() {
         controllerTimer?.cancel()
         controllerTimer = nil
-        guard controllerEndpoint != nil else { return }
+        guard !isPaused, controllerEndpoint != nil else { return }
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 3.0, repeating: .seconds(5), leeway: .seconds(2))
+        timer.schedule(deadline: .now() + 2.5, repeating: .seconds(4), leeway: .seconds(1))
         timer.setEventHandler { [weak self] in
-            self?.pollLoopbackControllerLocked()
+            self?.pollLoopbackControllerAsyncLocked()
         }
         controllerTimer = timer
         timer.resume()
     }
 
-    private func pollLoopbackControllerLocked() {
-        guard isActive, let endpoint = controllerEndpoint else { return }
-        guard let url = URL(string: "\(endpoint.baseURL)/configs") else { return }
-
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 0.8
-        config.timeoutIntervalForResource = 1.0
-        config.connectionProxyDictionary = [:] // Strictly direct loopback, never proxied
-        let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
-
+    private func buildControllerRequest(url: URL, secret: String?) -> URLRequest {
         var req = URLRequest(url: url)
-        if let secret = endpoint.secret, !secret.isEmpty {
+        if let secret = secret, !secret.isEmpty {
             req.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
         }
+        return req
+    }
 
-        let sem = DispatchSemaphore(value: 0)
-        var bodyData: Data?
-        let task = session.dataTask(with: req) { data, resp, _ in
-            if let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                bodyData = data
+    private func pollLoopbackControllerAsyncLocked() {
+        guard isActive, !isPaused, !isPollingController, let endpoint = controllerEndpoint else { return }
+        guard let configsURL = URL(string: "\(endpoint.baseURL)/configs") else { return }
+        let proxiesURL = URL(string: "\(endpoint.baseURL)/proxies")
+
+        isPollingController = true
+        let session = ensureControllerSessionLocked()
+        let group = DispatchGroup()
+
+        var configJSON: [String: Any]?
+        var proxiesJSON: [String: Any]?
+        let stateLock = NSLock()
+
+        group.enter()
+        session.dataTask(with: buildControllerRequest(url: configsURL, secret: endpoint.secret)) { data, resp, _ in
+            defer { group.leave() }
+            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return
             }
-            sem.signal()
-        }
-        task.resume()
-        _ = sem.wait(timeout: .now() + 1.0)
+            stateLock.lock()
+            configJSON = obj
+            stateLock.unlock()
+        }.resume()
 
-        guard let data = bodyData,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            consecutiveControllerFailures += 1
-            if consecutiveControllerFailures >= 2 {
-                // Controller port is closed; pause timer until a VNODE config event re-arms it
-                controllerTimer?.cancel()
-                controllerTimer = nil
+        if let proxiesURL {
+            group.enter()
+            session.dataTask(with: buildControllerRequest(url: proxiesURL, secret: endpoint.secret)) { data, resp, _ in
+                defer { group.leave() }
+                guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                      let data,
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    return
+                }
+                stateLock.lock()
+                proxiesJSON = obj
+                stateLock.unlock()
+            }.resume()
+        }
+
+        group.notify(queue: queue) { [weak self] in
+            guard let self else { return }
+            self.isPollingController = false
+            guard self.isActive, !self.isPaused else { return }
+
+            guard let json = configJSON else {
+                self.consecutiveControllerFailures += 1
+                if self.consecutiveControllerFailures >= 2 {
+                    self.controllerTimer?.cancel()
+                    self.controllerTimer = nil
+                }
+                return
             }
-            return
-        }
-        consecutiveControllerFailures = 0
-        let mode = (json["mode"] as? String) ?? ""
-        let tunDict = json["tun"] as? [String: Any]
-        let tunEnabled = (tunDict?["enable"] as? Bool) ?? false
-        let mixedPort = (json["mixed-port"] as? Int) ?? 0
-        let fp = "\(mode)|\(tunEnabled)|\(mixedPort)"
 
-        if let prev = lastControllerFingerprint, prev != fp {
-            lastControllerFingerprint = fp
-            onProxyStateChanged?("mihomo-controller:\(mode):tun=\(tunEnabled)")
-        } else {
-            lastControllerFingerprint = fp
+            self.consecutiveControllerFailures = 0
+            let mode = (json["mode"] as? String) ?? ""
+            let tunDict = json["tun"] as? [String: Any]
+            let tunEnabled = (tunDict?["enable"] as? Bool) ?? false
+            let mixedPort = (json["mixed-port"] as? Int) ?? 0
+
+            // Include active Selector/URLTest/Fallback node selections so proxy switches trigger immediately
+            var selectedNodes: [String] = []
+            if let proxiesMap = proxiesJSON?["proxies"] as? [String: [String: Any]] {
+                for key in proxiesMap.keys.sorted() {
+                    if let nowNode = proxiesMap[key]?["now"] as? String, !nowNode.isEmpty {
+                        selectedNodes.append("\(key)=\(nowNode)")
+                    }
+                }
+            }
+            let fp = "\(mode)|\(tunEnabled)|\(mixedPort)|\(selectedNodes.joined(separator: ";"))"
+
+            if let prev = self.lastControllerFingerprint, prev != fp {
+                self.lastControllerFingerprint = fp
+                self.onProxyStateChanged?("mihomo-controller:\(mode):tun=\(tunEnabled)")
+            } else {
+                self.lastControllerFingerprint = fp
+            }
         }
     }
 }

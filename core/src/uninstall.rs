@@ -1,4 +1,6 @@
 use crate::config::ShieldConfig;
+use crate::guard::current_uid;
+use crate::pf_guard::PF_ANCHOR_PATH;
 use crate::setup::BackupMeta;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -12,22 +14,11 @@ pub struct UninstallReport {
     pub warnings: Vec<String>,
 }
 
-fn get_uid() -> String {
-    Command::new("/usr/bin/id")
-        .arg("-u")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "501".to_string())
-}
-
 pub(crate) fn remove_launch_agent(plist_path: &Path) -> bool {
     if !plist_path.exists() {
         return false;
     }
-    let uid = get_uid();
-    let gui = format!("gui/{}", uid);
+    let gui = format!("gui/{}", current_uid());
     let p = plist_path.to_string_lossy().to_string();
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &gui, &p])
@@ -154,11 +145,14 @@ pub fn run_uninstall(cfg: &ShieldConfig, remove_app: bool) -> UninstallReport {
                             "LANG",
                             "LC_ALL",
                             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                            "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
                             "CLAUDE_CODE_ENABLE_TELEMETRY",
                             "DISABLE_TELEMETRY",
                             "DISABLE_ERROR_REPORTING",
                             "DISABLE_BUG_COMMAND",
                             "DISABLE_AUTOUPDATER",
+                            "OTEL_SDK_DISABLED",
+                            "DO_NOT_TRACK",
                         ] {
                             if env_obj.remove(k).is_some() {
                                 touched = true;
@@ -240,6 +234,13 @@ pub fn run_uninstall(cfg: &ShieldConfig, remove_app: bool) -> UninstallReport {
         if shield_app.exists() && fs::remove_dir_all(shield_app).is_ok() {
             restored.push("已移除 /Applications/Claude Shield.app".to_string());
         }
+    }
+
+    if Path::new(PF_ANCHOR_PATH).exists() {
+        warnings.push(
+            "检测到系统级内核 pf 锚点仍存在，如需关闭请执行: sudo claude-shield-core pf-guard disable"
+                .to_string(),
+        );
     }
 
     if restored.is_empty() {

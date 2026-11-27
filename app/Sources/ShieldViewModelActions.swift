@@ -91,8 +91,278 @@ extension ShieldViewModel {
         onStatusChange?(snapshot, purity)
     }
 
+    func dismissUpdateError() {
+        if case .failed = updatePhase {
+            updatePhase = .idle
+        }
+    }
+
     func openReleasePage(_ url: URL) {
         NSWorkspace.shared.open(url)
+    }
+
+    func hideOriginalAppNow() {
+        Task.detached(priority: .userInitiated) {
+            let actions = RustCoreBridge.hideOriginalApp()
+            await MainActor.run {
+                self.showToast(actions.isEmpty ? "原版 Claude.app 已处于隐藏状态" : "已自动隐藏原版 Claude.app 图标")
+                self.refresh(force: true)
+            }
+        }
+    }
+
+    func setLoginAutoStart(_ enabled: Bool) {
+        loginAutoStart = enabled
+        Task.detached(priority: .userInitiated) {
+            let actual = RustCoreBridge.toggleLaunchAgent(enabled: enabled)
+            await MainActor.run {
+                self.loginAutoStart = actual
+                self.showToast(actual ? "已开启开机自启保护雷达" : "已关闭开机自启雷达")
+            }
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            await MainActor.run {
+                self.refresh(force: true)
+            }
+        }
+    }
+
+    func findRunningClaudeApp() -> NSRunningApplication? {
+        if let pidStr = snapshot.defenses.desktop_pid, let pid = Int32(pidStr),
+           let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated {
+            return app
+        }
+        if let byBundle = NSRunningApplication.runningApplications(withBundleIdentifier: "com.anthropic.claudefordesktop")
+            .first(where: { !$0.isTerminated }) {
+            return byBundle
+        }
+        return NSWorkspace.shared.runningApplications.first { app in
+            guard !app.isTerminated else { return false }
+            if app.bundleURL?.lastPathComponent == "Claude.app" { return true }
+            if app.executableURL?.lastPathComponent == "Claude" { return true }
+            return app.localizedName == "Claude"
+        }
+    }
+
+    @discardableResult
+    func focusClaudeDesktop() -> Bool {
+        guard let runningApp = findRunningClaudeApp() else { return false }
+        onRequestClosePopover?()
+
+        runningApp.unhide()
+        if #available(macOS 14.0, *) {
+            NSApp.yieldActivation(to: runningApp)
+            runningApp.activate()
+        } else {
+            runningApp.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+        }
+
+        if let appURL = runningApp.bundleURL ?? RustCoreBridge.claudeDesktopAppURL() {
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = true
+            config.createsNewApplicationInstance = false
+            NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, _ in }
+        }
+        return true
+    }
+
+    func evaluateLaunchGuardContext() async -> LaunchGuardContext {
+        let cachedPurity = self.purity ?? RustCoreBridge.loadCachedPurity()
+        let fallbackExpected = self.snapshot.expected_ip
+
+        return await Task.detached(priority: .userInitiated) {
+            let gate = RustCoreBridge.fetchGate()
+            let currentIP: String = {
+                if let g = gate, !g.proxy_ip.isEmpty, g.proxy_ip != "无法连通" {
+                    return g.proxy_ip
+                }
+                if let g = gate, !g.claude_edge_ip.isEmpty, g.claude_edge_ip != "无法连通" {
+                    return g.claude_edge_ip
+                }
+                return "无法连通"
+            }()
+
+            let lastIP = RustCoreBridge.loadLastLaunchIP()
+            let expectedIP = gate?.expected_ip ?? fallbackExpected
+            let tunIP = gate?.tun_ip ?? "无法连通"
+            let gateOK = gate?.ok ?? false
+            let gateError = gate?.error ?? (gate == nil ? "无法调用 Rust 安全内核进行门禁校验。" : nil)
+
+            var purityReport = cachedPurity
+            let needsFreshPurity = (purityReport == nil || purityReport?.exit_ip != currentIP) && currentIP != "无法连通"
+            if needsFreshPurity {
+                if let fresh = RustCoreBridge.fetchPurity() {
+                    purityReport = fresh
+                }
+            }
+
+            let threshold = LaunchGuardContext.safePurityThreshold
+            let ipChanged: Bool = {
+                guard let last = lastIP, !last.isEmpty else { return false }
+                guard currentIP != "无法连通", !currentIP.isEmpty else { return true }
+                return currentIP != last
+            }()
+            let purityLow: Bool = {
+                if let p = purityReport {
+                    return p.purity_score < threshold
+                }
+                return currentIP == "无法连通"
+            }()
+
+            return LaunchGuardContext(
+                currentIP: currentIP,
+                lastLaunchIP: lastIP,
+                expectedIP: expectedIP,
+                tunIP: tunIP,
+                gateOK: gateOK,
+                gateError: gateError,
+                claudeLoc: gate?.claude_loc ?? purityReport?.country_code,
+                purity: purityReport,
+                ipChangedFromLast: ipChanged,
+                purityBelowThreshold: purityLow,
+                threshold: threshold
+            )
+        }.value
+    }
+
+    func launchClaudeSafe() {
+        // Only short-circuit to focusing an existing Desktop window when current telemetry is verified safe
+        if findRunningClaudeApp() != nil,
+           snapshot.expected_ip != "检测中...",
+           snapshot.isSafe,
+           !snapshot.desktopUnprotected {
+            if focusClaudeDesktop() {
+                showToast("已将 Claude 桌面版拉至前台")
+                return
+            }
+        }
+
+        guard !isCheckingLaunch else { return }
+        isCheckingLaunch = true
+        showToast("正在核验出口 IP 与纯净度...")
+
+        Task { @MainActor in
+            let ctx = await evaluateLaunchGuardContext()
+            self.isCheckingLaunch = false
+
+            if let p = ctx.purity {
+                self.purity = p
+                self.onStatusChange?(self.snapshot, p)
+            }
+
+            let shouldIntercept = !ctx.gateOK || ctx.ipChangedFromLast || ctx.purityBelowThreshold
+            if shouldIntercept {
+                self.onRequestClosePopover?()
+                self.onShowLaunchGuard?(ctx)
+            } else {
+                // Gate just passed on warm pool -> skip redundant cold gate re-probe
+                self.executeDesktopLaunch(force: false, recordIP: ctx.currentIP, gateAlreadyPassed: true)
+            }
+        }
+    }
+
+    func executeDesktopLaunch(force: Bool, recordIP: String?, gateAlreadyPassed: Bool = false) {
+        onRequestClosePopover?()
+        if let ip = recordIP {
+            RustCoreBridge.saveLastLaunchIP(ip)
+        }
+
+        let skipGate = force || gateAlreadyPassed
+        showToast(force ? "已强制安全启动 Claude 桌面版" : "验真通过，正在启动 Claude 桌面版...")
+
+        Task.detached(priority: .userInitiated) {
+            let outcome = RustCoreBridge.launchDesktop(skipGate: skipGate, verifiedIP: recordIP)
+            await MainActor.run {
+                if let outcome = outcome {
+                    if !outcome.ok {
+                        self.showToast(outcome.message)
+                    } else if outcome.already_running {
+                        self.focusClaudeDesktop()
+                    }
+                } else {
+                    // Fallback to CLI helper only if in-process FFI returned nil
+                    let bin = RustCoreBridge.coreBinaryPath
+                    let task = Process()
+                    if FileManager.default.isExecutableFile(atPath: bin) {
+                        task.executableURL = URL(fileURLWithPath: bin)
+                        task.arguments = skipGate ? ["launch-desktop", "--force"] : ["launch-desktop"]
+                    } else {
+                        let script = FileManager.default.homeDirectoryForCurrentUser
+                            .appendingPathComponent(".local/bin/claude-desktop-safe").path
+                        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+                        task.arguments = [script]
+                    }
+                    try? task.run()
+                }
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            await MainActor.run {
+                self.focusClaudeDesktop()
+                self.refresh(force: true)
+            }
+        }
+    }
+
+    nonisolated private static func postSystemNotificationAsync(title: String, body: String, sound: String? = "Sosumi") {
+        let safeTitle = title
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "'")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+        let safeBody = body
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "'")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+        let script: String
+        if let sound = sound {
+            script = "display notification \"\(safeBody)\" with title \"\(safeTitle)\" sound name \"\(sound)\""
+        } else {
+            script = "display notification \"\(safeBody)\" with title \"\(safeTitle)\""
+        }
+        Task.detached(priority: .utility) {
+            let alert = Process()
+            alert.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            alert.arguments = ["-e", script]
+            try? alert.run()
+            alert.waitUntilExit()
+        }
+    }
+
+    func killUnprotectedCLI(pids: [String]) {
+        Task.detached(priority: .userInitiated) {
+            _ = RustCoreBridge.killPIDs(pids)
+            Self.postSystemNotificationAsync(
+                title: "Claude Shield 熔断急停",
+                body: "发现未走安全门禁的 Claude Code 进程，已自动终止防裸连！"
+            )
+            await MainActor.run {
+                self.showToast("已终止未受保护的 CLI 进程")
+            }
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            await MainActor.run {
+                self.auditDefensesImmediately()
+            }
+        }
+    }
+
+    func emergencyKillClaude(includeCLI: Bool = true, reason: String? = nil) {
+        Task.detached(priority: .userInitiated) {
+            let outcome = RustCoreBridge.killClaude(includeCLI: includeCLI)
+            if let reason = reason {
+                Self.postSystemNotificationAsync(title: "Claude Shield 熔断急停", body: reason)
+            }
+            await MainActor.run {
+                if let out = outcome, out.killed_cli > 0 {
+                    self.showToast("已执行紧急急停（已终止桌面版与 \(out.killed_cli) 个 CLI 进程）")
+                } else {
+                    self.showToast("已执行紧急急停（Claude 进程已终止）")
+                }
+            }
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            await MainActor.run {
+                self.refresh(force: true)
+            }
+        }
     }
 
     func confirmAndUninstall() {

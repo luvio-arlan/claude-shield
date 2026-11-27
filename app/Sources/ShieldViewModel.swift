@@ -57,11 +57,13 @@ final class ShieldViewModel: ObservableObject {
     private var vnodeWatchers: [VnodeWatcher] = []
     private let mihomoMonitor = MihomoEventMonitor()
     private var lastPathSignature: String?
+    private var lastConfigFilesStamp: String?
     private var consecutiveUnreachableCount = 0
     private var lastRefreshAt: Date?
     private var lastFullRefreshAt: Date?
     private var currentTimerInterval: TimeInterval?
     private var isSystemAsleep: Bool = false
+    private var isScreenOff: Bool = false
     private var isLowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
     private var isAuditingDefenses: Bool = false
     private var isProbeInFlight: Bool = false
@@ -99,7 +101,7 @@ final class ShieldViewModel: ObservableObject {
         rescheduleTimer()
         if visible {
             let needsLive = lastRefreshAt.map { Date().timeIntervalSince($0) >= 2.2 } ?? true
-            if needsLive {
+            if needsLive || snapshot.api_latency.warm_rtt_ms == nil {
                 refresh(force: true, mode: .light, userInitiated: false)
             }
         }
@@ -111,7 +113,7 @@ final class ShieldViewModel: ObservableObject {
         rescheduleTimer()
         if visible {
             let needsLive = lastRefreshAt.map { Date().timeIntervalSince($0) >= 2.2 } ?? true
-            if needsLive {
+            if needsLive || snapshot.api_latency.warm_rtt_ms == nil {
                 refresh(force: true, mode: .light, userInitiated: false)
             }
         }
@@ -124,13 +126,13 @@ final class ShieldViewModel: ObservableObject {
         if isUIVisible {
             return 3.0
         }
-        if isLowPowerMode {
-            return 15.0
-        }
-        if snapshot.desktopRunning || !snapshot.isSafe {
+        if !snapshot.isSafe {
             return 4.0
         }
-        return 5.0
+        if snapshot.anyClaudeRunning {
+            return (isLowPowerMode || isScreenOff) ? 10.0 : 4.0
+        }
+        return (isLowPowerMode || isScreenOff) ? 25.0 : 15.0
     }
 
     private func rescheduleTimer() {
@@ -149,8 +151,20 @@ final class ShieldViewModel: ObservableObject {
                 self.refresh(force: false, mode: .light, userInitiated: false)
             }
         }
-        newTimer.tolerance = min(interval * 0.15, 1.0)
+        newTimer.tolerance = min(interval * 0.15, 2.0)
         timer = newTimer
+    }
+
+    nonisolated private static func captureConfigFilesStamp(configDir: String) -> String {
+        let fm = FileManager.default
+        let names = ["expected_ip", "proxy_port", "target_tz", "hide_original"]
+        return names.map { name in
+            let path = "\(configDir)/\(name)"
+            guard let attrs = try? fm.attributesOfItem(atPath: path) else { return "\(name):-" }
+            let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+            let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            return "\(name):\(size):\(Int64(mtime * 1000))"
+        }.joined(separator: "|")
     }
 
     nonisolated private static func isClaudeDesktopNotification(_ notification: Notification) -> Bool {
@@ -224,31 +238,32 @@ final class ShieldViewModel: ObservableObject {
             }
         }
 
-        let sleepHandler: @Sendable (Notification) -> Void = { [weak self] _ in
-            Task { @MainActor in
-                self?.isSystemAsleep = true
-                self?.rescheduleTimer()
-            }
-        }
+        // True system sleep pauses active network polling; screen sleep / lock NEVER blinds watchers or auto-kill!
         let willSleepObs = wsCenter.addObserver(
             forName: NSWorkspace.willSleepNotification,
             object: nil,
-            queue: .main,
-            using: sleepHandler
-        )
-        let screenSleepObs = wsCenter.addObserver(
-            forName: NSWorkspace.screensDidSleepNotification,
-            object: nil,
-            queue: .main,
-            using: sleepHandler
-        )
-
-        let wakeHandler: @Sendable (Notification) -> Void = { [weak self] _ in
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor in
-                guard let self = self else { return }
+                guard let self else { return }
+                self.isSystemAsleep = true
+                self.mihomoMonitor.setPaused(true)
+                self.rescheduleTimer()
+            }
+        }
+
+        let didWakeObs = wsCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
                 let wasAsleep = self.isSystemAsleep
                 self.isSystemAsleep = false
+                self.isScreenOff = false
                 self.consecutiveUnreachableCount = 0
+                self.mihomoMonitor.setPaused(false)
                 self.rescheduleTimer()
                 let mode: TelemetryProbeMode = self.isUIVisible ? .full : .light
                 self.refresh(force: true, mode: mode, resetPool: true)
@@ -260,18 +275,35 @@ final class ShieldViewModel: ObservableObject {
                 }
             }
         }
-        let didWakeObs = wsCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification,
+
+        let screenSleepObs = wsCenter.addObserver(
+            forName: NSWorkspace.screensDidSleepNotification,
             object: nil,
-            queue: .main,
-            using: wakeHandler
-        )
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isScreenOff = true
+                self.rescheduleTimer()
+            }
+        }
+
         let screenWakeObs = wsCenter.addObserver(
             forName: NSWorkspace.screensDidWakeNotification,
             object: nil,
-            queue: .main,
-            using: wakeHandler
-        )
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isScreenOff = false
+                self.rescheduleTimer()
+                guard !self.isSystemAsleep else { return }
+                let isStale = self.lastRefreshAt.map { Date().timeIntervalSince($0) >= 3.0 } ?? true
+                if isStale {
+                    self.refresh(force: true, mode: .light)
+                }
+            }
+        }
 
         workspaceObservers = [
             launchObs,
@@ -335,10 +367,15 @@ final class ShieldViewModel: ObservableObject {
 
         let configDir = "\(homePath)/.config/claude-guard"
         if FileManager.default.fileExists(atPath: configDir) {
+            self.lastConfigFilesStamp = Self.captureConfigFilesStamp(configDir: configDir)
             let cfgWatcher = VnodeWatcher(path: configDir, debounceInterval: 0.50) { [weak self] in
+                let newStamp = Self.captureConfigFilesStamp(configDir: configDir)
                 Task { @MainActor in
                     guard let self = self, !self.isSystemAsleep else { return }
-                    self.auditDefensesImmediately()
+                    // Ignore internal cache writes (last_telemetry.json / last_purity.json)
+                    guard newStamp != self.lastConfigFilesStamp else { return }
+                    self.lastConfigFilesStamp = newStamp
+                    self.refresh(force: true, mode: .light, resetPool: true)
                 }
             }
             if cfgWatcher.start() { vnodeWatchers.append(cfgWatcher) }
@@ -388,8 +425,12 @@ final class ShieldViewModel: ObservableObject {
 
                 if self.autoKillOnBreach {
                     if updated.desktopUnprotected {
-                        self.emergencyKillClaude(reason: "检测到未绑定硬代理或未禁 QUIC/WebRTC 的 Claude 桌面版进程（#\(defenses.desktop_pid ?? "?")），已即时熔断急停防裸连！")
-                    } else if updated.hasUnprotectedCLI {
+                        self.emergencyKillClaude(
+                            includeCLI: false,
+                            reason: "检测到未绑定硬代理或未禁 Bypass/QUIC/WebRTC 的 Claude 桌面版进程（#\(defenses.desktop_pid ?? "?")），已即时熔断急停防裸连！"
+                        )
+                    }
+                    if updated.hasUnprotectedCLI {
                         self.killUnprotectedCLI(pids: defenses.unprotected_cli_pids)
                     }
                 }
@@ -428,9 +469,16 @@ final class ShieldViewModel: ObservableObject {
         if userInitiated {
             isRefreshing = true
         }
+        let skipApi = !isUIVisible
+            && !userInitiated
+            && resolvedMode == .light
+            && !resetPool
+            && !snapshot.anyClaudeRunning
+            && snapshot.isSafe
+            && snapshot.api_latency.warm_rtt_ms != nil
         let priority: TaskPriority = (isUIVisible || force || userInitiated) ? .userInitiated : .utility
         Task.detached(priority: priority) {
-            let result = RustCoreBridge.fetchTelemetry(mode: resolvedMode, resetPool: resetPool)
+            let result = RustCoreBridge.fetchTelemetry(mode: resolvedMode, resetPool: resetPool, skipApi: skipApi)
             await MainActor.run {
                 self.isProbeInFlight = false
                 if let next = self.pendingRefresh {
@@ -472,19 +520,40 @@ final class ShieldViewModel: ObservableObject {
         }
 
         if self.autoKillOnBreach {
-            if result.desktopUnprotected {
-                self.emergencyKillClaude(reason: "检测到未绑定硬代理或未禁 QUIC/WebRTC 的 Claude 桌面版进程（#\(result.defenses.desktop_pid ?? "?")），已自动急停防裸连！")
-            } else if result.hasUnprotectedCLI {
-                self.killUnprotectedCLI(pids: result.defenses.unprotected_cli_pids)
-            } else if result.desktopRunning && result.isConfirmedIPDrift {
-                self.emergencyKillClaude(reason: "检测到出口 IP 漂移（Claude 边缘: \(result.proxy.ip) / TUN: \(result.tun.ip)），已自动急停 Claude 桌面版！")
-            } else if result.desktopRunning {
+            var killedAllSessions = false
+            if result.anyClaudeRunning && result.isConfirmedNetworkBreach {
+                let reason: String
+                if result.regionBanned {
+                    let loc = result.claude_edge.loc ?? result.tun.loc ?? "高危地区"
+                    reason = "检测到封禁出口地区（\(loc)），已自动急停所有 Claude 桌面版与终端进程！"
+                } else {
+                    reason = "检测到出口 IP 漂移（Claude 边缘: \(result.proxy.ip) / TUN: \(result.tun.ip)），已自动急停所有 Claude 桌面版与终端进程！"
+                }
+                self.emergencyKillClaude(includeCLI: true, reason: reason)
+                killedAllSessions = true
+            } else {
+                if result.desktopUnprotected {
+                    self.emergencyKillClaude(
+                        includeCLI: false,
+                        reason: "检测到未绑定硬代理或未禁 Bypass/QUIC/WebRTC 的 Claude 桌面版进程（#\(result.defenses.desktop_pid ?? "?")），已自动急停防裸连！"
+                    )
+                }
+                if result.hasUnprotectedCLI {
+                    self.killUnprotectedCLI(pids: result.defenses.unprotected_cli_pids)
+                }
+            }
+
+            if !killedAllSessions && result.anyClaudeRunning && (!result.proxyOK || !result.tunOK) {
                 self.consecutiveUnreachableCount += 1
                 if self.consecutiveUnreachableCount >= 2 {
                     self.consecutiveUnreachableCount = 0
-                    self.emergencyKillClaude(reason: "连续检测到代理/TUN 通道中断，已自动急停 Claude 桌面版（Fail-Closed）！")
+                    self.emergencyKillClaude(
+                        includeCLI: true,
+                        reason: "连续检测到代理/TUN 通道中断，已自动急停所有 Claude 桌面版与终端进程（Fail-Closed）！"
+                    )
                 } else {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                        guard let self = self, !self.isSystemAsleep else { return }
                         self.refresh(force: true, mode: .light, resetPool: true)
                     }
                 }
@@ -539,218 +608,6 @@ final class ShieldViewModel: ObservableObject {
                     self.showToast("全面体检失败，请检查代理连通性")
                 }
             }
-        }
-    }
-
-    func hideOriginalAppNow() {
-        Task.detached(priority: .userInitiated) {
-            let actions = RustCoreBridge.hideOriginalApp()
-            await MainActor.run {
-                self.showToast(actions.isEmpty ? "原版 Claude.app 已处于隐藏状态" : "已自动隐藏原版 Claude.app 图标")
-                self.refresh(force: true)
-            }
-        }
-    }
-
-    func setLoginAutoStart(_ enabled: Bool) {
-        let actual = RustCoreBridge.toggleLaunchAgent(enabled: enabled)
-        loginAutoStart = actual
-        showToast(actual ? "已开启开机自启保护雷达" : "已关闭开机自启雷达")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            self?.refresh(force: true)
-        }
-    }
-
-    private func findRunningClaudeApp() -> NSRunningApplication? {
-        if let pidStr = snapshot.defenses.desktop_pid, let pid = Int32(pidStr),
-           let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated {
-            return app
-        }
-        if let byBundle = NSRunningApplication.runningApplications(withBundleIdentifier: "com.anthropic.claudefordesktop")
-            .first(where: { !$0.isTerminated }) {
-            return byBundle
-        }
-        return NSWorkspace.shared.runningApplications.first { app in
-            guard !app.isTerminated else { return false }
-            if app.bundleURL?.lastPathComponent == "Claude.app" { return true }
-            if app.executableURL?.lastPathComponent == "Claude" { return true }
-            return app.localizedName == "Claude"
-        }
-    }
-
-    @discardableResult
-    func focusClaudeDesktop() -> Bool {
-        guard let runningApp = findRunningClaudeApp() else { return false }
-        onRequestClosePopover?()
-
-        runningApp.unhide()
-        if #available(macOS 14.0, *) {
-            NSApp.yieldActivation(to: runningApp)
-            runningApp.activate()
-        } else {
-            runningApp.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
-        }
-
-        if let appURL = runningApp.bundleURL ?? RustCoreBridge.claudeDesktopAppURL() {
-            let config = NSWorkspace.OpenConfiguration()
-            config.activates = true
-            config.createsNewApplicationInstance = false
-            NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, _ in }
-        }
-        return true
-    }
-
-    func evaluateLaunchGuardContext() async -> LaunchGuardContext {
-        let cachedPurity = self.purity ?? RustCoreBridge.loadCachedPurity()
-        let fallbackExpected = self.snapshot.expected_ip
-
-        return await Task.detached(priority: .userInitiated) {
-            let gate = RustCoreBridge.fetchGate()
-            let currentIP: String = {
-                if let g = gate, !g.proxy_ip.isEmpty, g.proxy_ip != "无法连通" {
-                    return g.proxy_ip
-                }
-                if let g = gate, !g.claude_edge_ip.isEmpty, g.claude_edge_ip != "无法连通" {
-                    return g.claude_edge_ip
-                }
-                return "无法连通"
-            }()
-
-            let lastIP = RustCoreBridge.loadLastLaunchIP()
-            let expectedIP = gate?.expected_ip ?? fallbackExpected
-            let tunIP = gate?.tun_ip ?? "无法连通"
-            let gateOK = gate?.ok ?? false
-            let gateError = gate?.error ?? (gate == nil ? "无法调用 Rust 安全内核进行门禁校验。" : nil)
-
-            var purityReport = cachedPurity
-            let needsFreshPurity = (purityReport == nil || purityReport?.exit_ip != currentIP) && currentIP != "无法连通"
-            if needsFreshPurity {
-                if let fresh = RustCoreBridge.fetchPurity() {
-                    purityReport = fresh
-                }
-            }
-
-            let threshold = LaunchGuardContext.safePurityThreshold
-            let ipChanged: Bool = {
-                guard let last = lastIP, !last.isEmpty else { return false }
-                guard currentIP != "无法连通", !currentIP.isEmpty else { return true }
-                return currentIP != last
-            }()
-            let purityLow: Bool = {
-                if let p = purityReport {
-                    return p.purity_score < threshold
-                }
-                return currentIP == "无法连通"
-            }()
-
-            return LaunchGuardContext(
-                currentIP: currentIP,
-                lastLaunchIP: lastIP,
-                expectedIP: expectedIP,
-                tunIP: tunIP,
-                gateOK: gateOK,
-                gateError: gateError,
-                claudeLoc: gate?.claude_loc ?? purityReport?.country_code,
-                purity: purityReport,
-                ipChangedFromLast: ipChanged,
-                purityBelowThreshold: purityLow,
-                threshold: threshold
-            )
-        }.value
-    }
-
-    func launchClaudeSafe() {
-        if findRunningClaudeApp() != nil && !snapshot.desktopUnprotected {
-            if focusClaudeDesktop() {
-                showToast("已将 Claude 桌面版拉至前台")
-                return
-            }
-        }
-
-        guard !isCheckingLaunch else { return }
-        isCheckingLaunch = true
-        showToast("正在核验出口 IP 与纯净度...")
-
-        Task { @MainActor in
-            let ctx = await evaluateLaunchGuardContext()
-            self.isCheckingLaunch = false
-
-            if let p = ctx.purity {
-                self.purity = p
-                self.onStatusChange?(self.snapshot, p)
-            }
-
-            let shouldIntercept = !ctx.gateOK || ctx.ipChangedFromLast || ctx.purityBelowThreshold
-            if shouldIntercept {
-                self.onRequestClosePopover?()
-                self.onShowLaunchGuard?(ctx)
-            } else {
-                self.executeDesktopLaunch(force: false, recordIP: ctx.currentIP)
-            }
-        }
-    }
-
-    func executeDesktopLaunch(force: Bool, recordIP: String?) {
-        onRequestClosePopover?()
-        if let ip = recordIP {
-            RustCoreBridge.saveLastLaunchIP(ip)
-        }
-
-        let bin = RustCoreBridge.coreBinaryPath
-        let task = Process()
-        if FileManager.default.isExecutableFile(atPath: bin) {
-            task.executableURL = URL(fileURLWithPath: bin)
-            task.arguments = force ? ["launch-desktop", "--force"] : ["launch-desktop"]
-        } else {
-            let script = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".local/bin/claude-desktop-safe").path
-            task.executableURL = URL(fileURLWithPath: "/bin/bash")
-            task.arguments = [script]
-        }
-        try? task.run()
-        showToast(force ? "已强制安全启动 Claude 桌面版" : "验真通过，正在启动 Claude 桌面版...")
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
-            self?.focusClaudeDesktop()
-            self?.refresh(force: true)
-        }
-    }
-
-    private func killUnprotectedCLI(pids: [String]) {
-        for pid in pids {
-            let t = Process()
-            t.executableURL = URL(fileURLWithPath: "/bin/kill")
-            t.arguments = ["-9", pid]
-            try? t.run()
-        }
-        let alert = Process()
-        alert.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        alert.arguments = ["-e", "display notification \"发现未走安全门禁的 Claude Code 进程，已自动终止防裸连！\" with title \"Claude Shield 熔断急停\" sound name \"Sosumi\""]
-        try? alert.run()
-        showToast("已终止未受保护的 CLI 进程")
-    }
-
-    func emergencyKillClaude(reason: String? = nil) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        task.arguments = ["-9", "-x", "Claude"]
-        try? task.run()
-        task.waitUntilExit()
-
-        if let reason = reason {
-            let safe = reason
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "'")
-                .replacingOccurrences(of: "\r", with: " ")
-                .replacingOccurrences(of: "\n", with: " ")
-            let alert = Process()
-            alert.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            alert.arguments = ["-e", "display notification \"\(safe)\" with title \"Claude Shield 熔断急停\" sound name \"Sosumi\""]
-            try? alert.run()
-        }
-        showToast("已执行紧急急停（Claude 进程已终止）")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            self?.refresh(force: true)
         }
     }
 

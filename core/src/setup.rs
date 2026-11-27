@@ -1,6 +1,6 @@
 use crate::config::ShieldConfig;
 use crate::detect::find_real_claude_cli;
-use crate::guard::hide_original_claude_app;
+use crate::guard::{current_uid, hide_original_claude_app};
 use crate::uninstall::remove_launch_agent;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -109,16 +109,6 @@ pub(crate) fn ensure_shell_path_block(rc_path: &Path) -> Option<String> {
     }
 }
 
-fn get_uid() -> String {
-    Command::new("/usr/bin/id")
-        .arg("-u")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "501".to_string())
-}
-
 fn install_launch_agent(plist_path: &Path, content: &str) -> bool {
     if let Some(parent) = plist_path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -126,8 +116,7 @@ fn install_launch_agent(plist_path: &Path, content: &str) -> bool {
     if fs::write(plist_path, content).is_err() {
         return false;
     }
-    let uid = get_uid();
-    let gui = format!("gui/{}", uid);
+    let gui = format!("gui/{}", current_uid());
     let p = plist_path.to_string_lossy().to_string();
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &gui, &p])
@@ -205,10 +194,15 @@ pub fn run_setup(cfg: &ShieldConfig, opts: &SetupOptions) -> SetupReport {
     if let Ok(cur_exe) = std::env::current_exe() {
         let same_file = fs::canonicalize(&cur_exe).ok() == fs::canonicalize(&core_dst).ok();
         if !same_file {
-            if fs::copy(&cur_exe, &core_dst).is_ok() {
-                let _ = fs::set_permissions(&core_dst, fs::Permissions::from_mode(0o755));
+            // Atomic temp copy + rename so Apple Silicon arm64 CS_BLOB cache is never invalidated in-place
+            let core_tmp = local_bin.join(format!(".claude-shield-core.{}.tmp", std::process::id()));
+            let copied = fs::copy(&cur_exe, &core_tmp)
+                .and_then(|_| fs::set_permissions(&core_tmp, fs::Permissions::from_mode(0o755)))
+                .and_then(|_| fs::rename(&core_tmp, &core_dst));
+            if copied.is_ok() {
                 actions.push("已同步原生 Rust 核心引擎至 ~/.local/bin/claude-shield-core".to_string());
             } else {
+                let _ = fs::remove_file(&core_tmp);
                 warnings.push("未能复制核心引擎至 ~/.local/bin/claude-shield-core".to_string());
             }
         }
@@ -222,11 +216,13 @@ pub fn run_setup(cfg: &ShieldConfig, opts: &SetupOptions) -> SetupReport {
     let oauth_script = r#"#!/usr/bin/env bash
 # Claude Shield Managed Wrapper
 set -euo pipefail
+shopt -s nocasematch
 for arg in "$@"; do
   if [[ "${arg}" == *"claude.ai"* || "${arg}" == *"anthropic.com"* || "${arg}" == *"claude.com"* ]]; then
     printf '%s' "${arg}" | /usr/bin/pbcopy 2>/dev/null || true
     printf '\n\033[1;33m🔒 [Claude Shield] 已拦截本机默认浏览器弹窗！\033[0m\n' >&2
     printf '\033[0;36m授权链接已自动复制到剪贴板，请粘贴进 AdsPower 指纹浏览器完成授权：\033[0m\n%s\n\n' "${arg}" >&2
+    /usr/bin/osascript -e 'display notification "授权链接已自动复制到剪贴板，请粘贴进 AdsPower 指纹浏览器完成授权。" with title "Claude Shield · OAuth 弹窗已拦截"' >/dev/null 2>&1 || true
     exit 0
   fi
 done
@@ -261,7 +257,9 @@ export_claude_env() {{
   export http_proxy="${{PROXY_HTTP}}" https_proxy="${{PROXY_HTTP}}" all_proxy="${{PROXY_SOCKS}}"
   export NO_PROXY="localhost,127.0.0.1,::1" no_proxy="localhost,127.0.0.1,::1"
   export NODE_OPTIONS="${{NODE_OPTIONS:+${{NODE_OPTIONS}} }}--dns-result-order=ipv4first"
+  export NODE_USE_ENV_PROXY="1"
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
+  export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY="1"
   export CLAUDE_CODE_ENABLE_TELEMETRY="0"
   export DISABLE_TELEMETRY="1"
   export DISABLE_ERROR_REPORTING="1"
@@ -349,11 +347,14 @@ exec "$HOME/.local/bin/claude-shield-core" exec-cli "${{REAL_CLAUDE}}" "$@"
             env_obj.insert("LANG".to_string(), serde_json::json!("en_US.UTF-8"));
             env_obj.insert("LC_ALL".to_string(), serde_json::json!("en_US.UTF-8"));
             env_obj.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(), serde_json::json!("1"));
+            env_obj.insert("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY".to_string(), serde_json::json!("1"));
             env_obj.insert("CLAUDE_CODE_ENABLE_TELEMETRY".to_string(), serde_json::json!("0"));
             env_obj.insert("DISABLE_TELEMETRY".to_string(), serde_json::json!("1"));
             env_obj.insert("DISABLE_ERROR_REPORTING".to_string(), serde_json::json!("1"));
             env_obj.insert("DISABLE_BUG_COMMAND".to_string(), serde_json::json!("1"));
             env_obj.insert("DISABLE_AUTOUPDATER".to_string(), serde_json::json!("1"));
+            env_obj.insert("OTEL_SDK_DISABLED".to_string(), serde_json::json!("1"));
+            env_obj.insert("DO_NOT_TRACK".to_string(), serde_json::json!("1"));
         }
     }
     if let Ok(pretty) = serde_json::to_string_pretty(&settings_val) {

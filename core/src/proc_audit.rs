@@ -3,9 +3,12 @@ use crate::guard::{is_candidate_cli_comm, is_genuine_claude_cli_args};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeProcessInspection {
     pub desktop_pid: Option<String>,
+    pub desktop_pids: Vec<String>,
     pub desktop_proxy_bound: bool,
+    pub desktop_bypass_locked: bool,
     pub desktop_quic_disabled: bool,
     pub desktop_webrtc_locked: bool,
+    pub active_cli_pids: Vec<String>,
     pub unprotected_cli_pids: Vec<String>,
 }
 
@@ -13,9 +16,12 @@ impl Default for ClaudeProcessInspection {
     fn default() -> Self {
         Self {
             desktop_pid: None,
+            desktop_pids: Vec::new(),
             desktop_proxy_bound: true,
+            desktop_bypass_locked: true,
             desktop_quic_disabled: true,
             desktop_webrtc_locked: true,
+            active_cli_pids: Vec::new(),
             unprotected_cli_pids: Vec::new(),
         }
     }
@@ -27,10 +33,57 @@ pub(crate) fn is_claude_desktop_exec(exec_path: &str) -> bool {
         && (exec_path == "Claude" || exec_path.ends_with("/Contents/MacOS/Claude"))
 }
 
+fn is_dangerous_no_proxy_value(val: &str) -> bool {
+    val.split(',').any(|raw| {
+        let token = raw.trim().to_ascii_lowercase();
+        matches!(
+            token.as_str(),
+            "*" | "anthropic.com"
+                | ".anthropic.com"
+                | "api.anthropic.com"
+                | "claude.ai"
+                | ".claude.ai"
+                | "claude.com"
+                | ".claude.com"
+        ) || token.ends_with(".anthropic.com")
+            || token.ends_with(".claude.ai")
+            || token.ends_with(".claude.com")
+    })
+}
+
 pub(crate) fn has_expected_proxy_env_entries(envp: &[String], proxy_port: u16) -> bool {
-    let upper = format!("HTTP_PROXY=http://127.0.0.1:{}", proxy_port);
-    let lower = format!("http_proxy=http://127.0.0.1:{}", proxy_port);
-    envp.iter().any(|entry| entry == &upper || entry == &lower)
+    if envp.is_empty() {
+        return false;
+    }
+    let http_upper = format!("HTTP_PROXY=http://127.0.0.1:{}", proxy_port);
+    let http_lower = format!("http_proxy=http://127.0.0.1:{}", proxy_port);
+    let https_upper = format!("HTTPS_PROXY=http://127.0.0.1:{}", proxy_port);
+    let https_lower = format!("https_proxy=http://127.0.0.1:{}", proxy_port);
+
+    let has_http = envp.iter().any(|e| e == &http_upper || e == &http_lower);
+    let has_https = envp.iter().any(|e| e == &https_upper || e == &https_lower);
+    if !has_http || !has_https {
+        return false;
+    }
+
+    for entry in envp {
+        if let Some(val) = entry
+            .strip_prefix("NO_PROXY=")
+            .or_else(|| entry.strip_prefix("no_proxy="))
+        {
+            if is_dangerous_no_proxy_value(val) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn raw_procargs_contains_ascii(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Parse Darwin `KERN_PROCARGS2` buffer layout:
@@ -175,7 +228,13 @@ mod macos {
         std::str::from_utf8(slice).ok()
     }
 
-    pub(super) fn read_process_args_and_env(pid: i32, raw_buf: &mut Vec<u8>) -> Option<(Vec<String>, Vec<String>)> {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static PROCARGS_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn read_raw_procargs2(pid: i32, raw_buf: &mut Vec<u8>) -> Option<usize> {
         let max_size = kern_argmax();
         if raw_buf.len() < max_size {
             raw_buf.resize(max_size, 0);
@@ -195,6 +254,12 @@ mod macos {
         if rc != 0 || len < 4 {
             return None;
         }
+        Some(len)
+    }
+
+    #[cfg(test)]
+    pub(super) fn read_process_args_and_env(pid: i32, raw_buf: &mut Vec<u8>) -> Option<(Vec<String>, Vec<String>)> {
+        let len = read_raw_procargs2(pid, raw_buf)?;
         parse_procargs2(&raw_buf[..len])
     }
 
@@ -205,49 +270,80 @@ mod macos {
 
         let pids = list_all_pids();
         let mut path_buf = [0u8; PROC_PIDPATHINFO_MAXSIZE];
-        let mut raw_args_buf: Vec<u8> = Vec::new();
 
-        for pid in pids {
-            if pid <= 0 || pid == self_pid {
-                continue;
-            }
-            let Some(exec_path) = read_pid_path(pid, &mut path_buf) else {
-                continue;
-            };
-
-            if is_claude_desktop_exec(exec_path) {
-                if out.desktop_pid.is_none() {
-                    out.desktop_pid = Some(pid.to_string());
-                    if let Some((args, _)) = read_process_args_and_env(pid, &mut raw_args_buf) {
-                        out.desktop_proxy_bound = args.iter().any(|a| a == &expected_flag);
-                        out.desktop_quic_disabled = args.iter().any(|a| a == "--disable-quic");
-                        out.desktop_webrtc_locked = args
-                            .iter()
-                            .any(|a| a == "--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
-                    } else {
-                        out.desktop_proxy_bound = false;
-                        out.desktop_quic_disabled = false;
-                        out.desktop_webrtc_locked = false;
-                    }
+        PROCARGS_SCRATCH.with(|cell| {
+            let mut raw_args_buf = cell.borrow_mut();
+            for pid in pids {
+                if pid <= 0 || pid == self_pid {
+                    continue;
                 }
-                continue;
-            }
+                let Some(exec_path) = read_pid_path(pid, &mut path_buf) else {
+                    continue;
+                };
 
-            if !is_candidate_cli_comm(exec_path) {
-                continue;
-            }
+                if is_claude_desktop_exec(exec_path) {
+                    let pid_str = pid.to_string();
+                    out.desktop_pids.push(pid_str.clone());
+                    let (proxy_ok, bypass_ok, quic_ok, webrtc_ok) =
+                        if let Some(len) = read_raw_procargs2(pid, &mut raw_args_buf) {
+                            if let Some((args, _)) = parse_procargs2(&raw_args_buf[..len]) {
+                                (
+                                    args.iter().any(|a| a == &expected_flag),
+                                    args.iter().any(|a| a == "--proxy-bypass-list=<-loopback>"),
+                                    args.iter().any(|a| a == "--disable-quic"),
+                                    args.iter().any(|a| {
+                                        a == "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+                                    }),
+                                )
+                            } else {
+                                (false, false, false, false)
+                            }
+                        } else {
+                            (false, false, false, false)
+                        };
 
-            let Some((args, envp)) = read_process_args_and_env(pid, &mut raw_args_buf) else {
-                continue;
-            };
-            let args_joined = args.join(" ");
-            if !is_genuine_claude_cli_args(exec_path, &args_joined) {
-                continue;
+                    let this_unprotected = !(proxy_ok && bypass_ok && quic_ok && webrtc_ok);
+                    if out.desktop_pid.is_none() || this_unprotected {
+                        out.desktop_pid = Some(pid_str);
+                    }
+                    out.desktop_proxy_bound &= proxy_ok;
+                    out.desktop_bypass_locked &= bypass_ok;
+                    out.desktop_quic_disabled &= quic_ok;
+                    out.desktop_webrtc_locked &= webrtc_ok;
+                    continue;
+                }
+
+                if !is_candidate_cli_comm(exec_path) {
+                    continue;
+                }
+
+                let Some(len) = read_raw_procargs2(pid, &mut raw_args_buf) else {
+                    continue;
+                };
+                let slice = &raw_args_buf[..len];
+
+                // Fast zero-allocation pre-filter for generic `node`/`bun` processes
+                let base = exec_path.rsplit('/').next().unwrap_or(exec_path);
+                if matches!(base, "node" | "bun")
+                    && !raw_procargs_contains_ascii(slice, b"claude-code")
+                {
+                    continue;
+                }
+
+                let Some((args, envp)) = parse_procargs2(slice) else {
+                    continue;
+                };
+                let args_joined = args.join(" ");
+                if !is_genuine_claude_cli_args(exec_path, &args_joined) {
+                    continue;
+                }
+                let pid_str = pid.to_string();
+                out.active_cli_pids.push(pid_str.clone());
+                if !has_expected_proxy_env_entries(&envp, proxy_port) {
+                    out.unprotected_cli_pids.push(pid_str);
+                }
             }
-            if !envp.is_empty() && !has_expected_proxy_env_entries(&envp, proxy_port) {
-                out.unprotected_cli_pids.push(pid.to_string());
-            }
-        }
+        });
 
         out
     }
@@ -288,16 +384,50 @@ mod tests {
         let blob = build_procargs2_blob(
             "/opt/homebrew/bin/node",
             &["node", "/opt/node_modules/@anthropic-ai/claude-code/cli.js", "--resume"],
-            &["PATH=/usr/bin", "HTTP_PROXY=http://127.0.0.1:7897", "TZ=America/Los_Angeles"],
+            &[
+                "PATH=/usr/bin",
+                "HTTP_PROXY=http://127.0.0.1:7897",
+                "HTTPS_PROXY=http://127.0.0.1:7897",
+                "NO_PROXY=localhost,127.0.0.1,::1",
+                "TZ=America/Los_Angeles",
+            ],
             3,
         );
         let (args, envp) = parse_procargs2(&blob).expect("parse valid procargs2");
         assert_eq!(args.len(), 3);
         assert_eq!(args[0], "node");
         assert_eq!(args[2], "--resume");
-        assert_eq!(envp.len(), 3);
+        assert_eq!(envp.len(), 5);
         assert!(has_expected_proxy_env_entries(&envp, 7897));
         assert!(!has_expected_proxy_env_entries(&envp, 7890));
+    }
+
+    #[test]
+    fn proxy_env_audit_requires_both_http_and_https_and_rejects_bypass_or_empty() {
+        // Missing HTTPS_PROXY -> unprotected
+        assert!(!has_expected_proxy_env_entries(
+            &["HTTP_PROXY=http://127.0.0.1:7897".into()],
+            7897
+        ));
+        // Empty env -> fail-closed unprotected
+        assert!(!has_expected_proxy_env_entries(&[], 7897));
+        // Dangerous NO_PROXY wildcard or anthropic bypass -> unprotected
+        assert!(!has_expected_proxy_env_entries(
+            &[
+                "HTTP_PROXY=http://127.0.0.1:7897".into(),
+                "HTTPS_PROXY=http://127.0.0.1:7897".into(),
+                "NO_PROXY=*".into(),
+            ],
+            7897
+        ));
+        assert!(!has_expected_proxy_env_entries(
+            &[
+                "HTTP_PROXY=http://127.0.0.1:7897".into(),
+                "HTTPS_PROXY=http://127.0.0.1:7897".into(),
+                "no_proxy=localhost,api.anthropic.com".into(),
+            ],
+            7897
+        ));
     }
 
     #[test]

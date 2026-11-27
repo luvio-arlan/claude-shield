@@ -115,7 +115,11 @@ extension ShieldPopoverView {
                 metricTile(
                     icon: "terminal.fill",
                     title: "Claude Code",
-                    value: vm.snapshot.hasUnprotectedCLI ? "发现未保护进程!" : (d.cli_ready ? "Rust 门禁就绪" : "待初始化"),
+                    value: vm.snapshot.hasUnprotectedCLI
+                        ? "发现未保护进程!"
+                        : (vm.snapshot.hasActiveCLI
+                            ? "守护中 · \(d.activeCLIPIDs.count) 进程"
+                            : (d.cli_ready ? "Rust 门禁就绪" : "待初始化")),
                     ok: d.cli_ready && !vm.snapshot.hasUnprotectedCLI
                 )
             }
@@ -401,15 +405,15 @@ extension ShieldPopoverView {
                     vm.refresh(force: true, mode: .full, userInitiated: true)
                 }
 
-                if vm.snapshot.desktopRunning {
+                if vm.snapshot.anyClaudeRunning {
                     secondaryActionButton(
                         icon: "stop.circle.fill",
                         title: "急停",
                         tint: dangerRed,
                         isDestructive: true,
-                        help: "立即强制终止 Claude 桌面版进程"
+                        help: "立即强制终止运行中的 Claude 桌面版与 CLI 进程"
                     ) {
-                        vm.emergencyKillClaude()
+                        vm.emergencyKillClaude(includeCLI: true)
                     }
                 }
             }

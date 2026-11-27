@@ -11,7 +11,7 @@ enum AppReleaseConfig {
            !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return v.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return "3.6.0"
+        return "3.7.0"
     }
 
     static var shortDisplayVersion: String {
@@ -172,24 +172,42 @@ private final class DownloadProgressBridge: NSObject, URLSessionDownloadDelegate
 enum GitHubUpdater {
     enum UpdateError: LocalizedError {
         case invalidURL
+        case untrustedDownloadHost
         case httpStatus(Int)
         case noZipAsset
+        case missingChecksumAsset
         case checksumVerificationFailed
         case checksumMismatch
         case extractFailed
         case appNotFoundInArchive
+        case bundleIdentifierMismatch
 
         var errorDescription: String? {
             switch self {
             case .invalidURL: return "更新地址无效"
+            case .untrustedDownloadHost: return "更新下载地址不在受信任的 GitHub 域名白名单中，已中止更新"
             case .httpStatus(let code): return "GitHub 接口返回异常（HTTP \(code)）"
             case .noZipAsset: return "该版本未附带 macOS ZIP 安装包，请前往 GitHub 手动下载"
+            case .missingChecksumAsset: return "该版本未附带 SHA256SUMS.txt 校验文件，为保障安全已中止自动更新"
             case .checksumVerificationFailed: return "无法获取或匹配 SHA-256 校验文件，已中止更新"
             case .checksumMismatch: return "安装包 SHA-256 校验失败，已中止更新以保障安全"
             case .extractFailed: return "解压更新包失败，请重试或前往 GitHub 手动下载"
             case .appNotFoundInArchive: return "更新包中未找到 Claude Shield.app"
+            case .bundleIdentifierMismatch: return "更新包 Bundle ID 校验不匹配，已中止替换"
             }
         }
+    }
+
+    private static func isTrustedGitHubURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased() else {
+            return false
+        }
+        return host == "github.com"
+            || host == "api.github.com"
+            || host == "objects.githubusercontent.com"
+            || host == "release-assets.githubusercontent.com"
+            || host == "github-releases.githubusercontent.com"
     }
 
     private static func makeSession(proxyPort: Int?, timeout: TimeInterval, delegate: URLSessionDelegate? = nil) -> URLSession {
@@ -311,8 +329,15 @@ enum GitHubUpdater {
         onProgress: @escaping @Sendable (Double) -> Void,
         onStage: @escaping @Sendable (String) -> Void
     ) async throws {
-        guard let zipURL = info.zipDownloadURL else {
+        guard let zipURL = info.zipDownloadURL, let assetName = info.zipAssetName else {
             throw UpdateError.noZipAsset
+        }
+        // Fail-closed supply-chain check: require SHA256SUMS.txt and trusted GitHub HTTPS origins
+        guard let sumURL = info.checksumURL else {
+            throw UpdateError.missingChecksumAsset
+        }
+        guard isTrustedGitHubURL(zipURL), isTrustedGitHubURL(sumURL) else {
+            throw UpdateError.untrustedDownloadHost
         }
 
         func downloadOnce(port: Int?) async throws -> URL {
@@ -342,35 +367,33 @@ enum GitHubUpdater {
         try? fm.removeItem(at: stagingDir)
         try fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
 
-        let zipPath = stagingDir.appendingPathComponent(info.zipAssetName ?? "update.zip")
+        let zipPath = stagingDir.appendingPathComponent(assetName)
         try? fm.removeItem(at: zipPath)
         try fm.moveItem(at: downloadedTemp, to: zipPath)
 
-        // Fail-closed SHA-256 verification whenever release publishes SHA256SUMS.txt
-        if let sumURL = info.checksumURL, let assetName = info.zipAssetName {
-            onStage("正在校验 SHA-256 签名...")
-            let (sumData, http) = try await fetchDataWithFallback(url: sumURL, accept: nil, proxyPort: proxyPort)
-            guard (200...299).contains(http.statusCode),
-                  let sumText = String(data: sumData, encoding: .utf8) else {
-                throw UpdateError.checksumVerificationFailed
+        // Mandatory fail-closed SHA-256 verification
+        onStage("正在校验 SHA-256 签名...")
+        let (sumData, http) = try await fetchDataWithFallback(url: sumURL, accept: nil, proxyPort: proxyPort)
+        guard (200...299).contains(http.statusCode),
+              let sumText = String(data: sumData, encoding: .utf8) else {
+            throw UpdateError.checksumVerificationFailed
+        }
+        let expectedHash = sumText
+            .components(separatedBy: .newlines)
+            .compactMap { line -> String? in
+                let parts = line.split(whereSeparator: { $0.isWhitespace })
+                guard parts.count >= 2 else { return nil }
+                let name = String(parts[1]).replacingOccurrences(of: "*", with: "")
+                return name == assetName ? String(parts[0]).lowercased() : nil
             }
-            let expectedHash = sumText
-                .components(separatedBy: .newlines)
-                .compactMap { line -> String? in
-                    let parts = line.split(whereSeparator: { $0.isWhitespace })
-                    guard parts.count >= 2 else { return nil }
-                    let name = String(parts[1]).replacingOccurrences(of: "*", with: "")
-                    return name == assetName ? String(parts[0]).lowercased() : nil
-                }
-                .first
-            guard let expected = expectedHash else {
-                throw UpdateError.checksumVerificationFailed
-            }
-            let fileData = try Data(contentsOf: zipPath)
-            let digest = SHA256.hash(data: fileData).map { String(format: "%02x", $0) }.joined()
-            guard digest == expected else {
-                throw UpdateError.checksumMismatch
-            }
+            .first
+        guard let expected = expectedHash else {
+            throw UpdateError.checksumVerificationFailed
+        }
+        let fileData = try Data(contentsOf: zipPath)
+        let digest = SHA256.hash(data: fileData).map { String(format: "%02x", $0) }.joined()
+        guard digest == expected else {
+            throw UpdateError.checksumMismatch
         }
 
         onStage("正在解压新版本...")
@@ -400,6 +423,16 @@ enum GitHubUpdater {
         guard fm.isExecutableFile(atPath: candidateApp.appendingPathComponent("Contents/MacOS/ClaudeShield").path) else {
             throw UpdateError.appNotFoundInArchive
         }
+        let infoPlistURL = candidateApp.appendingPathComponent("Contents/Info.plist")
+        if let plistData = try? Data(contentsOf: infoPlistURL),
+           let plist = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any],
+           let bundleID = plist["CFBundleIdentifier"] as? String {
+            guard bundleID == "com.local.claude.shield" else {
+                throw UpdateError.bundleIdentifierMismatch
+            }
+        } else {
+            throw UpdateError.bundleIdentifierMismatch
+        }
 
         let xattr = Process()
         xattr.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
@@ -426,7 +459,7 @@ enum GitHubUpdater {
         TARGET_APP="$3"
         STAGING_DIR="$4"
 
-        for _ in $(seq 1 60); do
+        for _ in $(seq 1 150); do
           if ! kill -0 "${OLD_PID}" 2>/dev/null; then
             break
           fi
@@ -461,8 +494,11 @@ enum GitHubUpdater {
 
         /usr/bin/xattr -cr "${TARGET_APP}" 2>/dev/null || true
         if [[ -x "${TARGET_APP}/Contents/MacOS/claude-shield-core" && -d "${HOME}/.local/bin" ]]; then
-          cp "${TARGET_APP}/Contents/MacOS/claude-shield-core" "${HOME}/.local/bin/claude-shield-core" 2>/dev/null || true
-          chmod +x "${HOME}/.local/bin/claude-shield-core" 2>/dev/null || true
+          TMP_CORE="${HOME}/.local/bin/.claude-shield-core.tmp.$$"
+          if cp "${TARGET_APP}/Contents/MacOS/claude-shield-core" "${TMP_CORE}" 2>/dev/null; then
+            chmod +x "${TMP_CORE}" 2>/dev/null || true
+            mv -f "${TMP_CORE}" "${HOME}/.local/bin/claude-shield-core" 2>/dev/null || rm -f "${TMP_CORE}"
+          fi
         fi
         LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
         [[ -x "${LSREG}" ]] && "${LSREG}" -f "${TARGET_APP}" >/dev/null 2>&1 || true

@@ -17,6 +17,8 @@ struct WorkerRequest {
     mode: Option<String>,
     #[serde(default)]
     reset_pool: bool,
+    #[serde(default)]
+    skip_api: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,7 +33,7 @@ struct WorkerResponse<T: Serialize> {
 
 pub(crate) fn telemetry_cache_signature(t: &TelemetryJson) -> String {
     format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         t.expected_ip,
         t.proxy_port,
         t.target_tz,
@@ -40,6 +42,8 @@ pub(crate) fn telemetry_cache_signature(t: &TelemetryJson) -> String {
         t.tun.reachable,
         t.tun.ip,
         t.claude_edge.colo.as_deref().unwrap_or(""),
+        t.claude_edge.loc.as_deref().unwrap_or(""),
+        t.tun.loc.as_deref().unwrap_or(""),
         t.defenses.oauth_locked,
         t.defenses.original_hidden,
         t.defenses.original_app_exposed,
@@ -47,8 +51,10 @@ pub(crate) fn telemetry_cache_signature(t: &TelemetryJson) -> String {
         t.defenses.telemetry_disabled,
         t.defenses.desktop_pid.as_deref().unwrap_or(""),
         t.defenses.desktop_proxy_bound,
+        t.defenses.desktop_bypass_locked,
         t.defenses.desktop_quic_disabled,
         t.defenses.desktop_webrtc_locked,
+        t.defenses.active_cli_pids.join(","),
         t.defenses.unprotected_cli_pids.join(","),
     )
 }
@@ -125,12 +131,12 @@ pub async fn run_worker_loop() {
             }
         };
 
-        let cfg = ShieldConfig::load();
+        let cfg = ShieldConfig::load_cached();
         let wrote = match req.cmd.as_str() {
             "telemetry" => {
                 let is_light = req.mode.as_deref() == Some("light");
                 let net = if is_light {
-                    pool.probe_light(&cfg, req.reset_pool).await
+                    pool.probe_light_opts(&cfg, req.reset_pool, req.skip_api).await
                 } else {
                     pool.probe_full(&cfg, req.reset_pool).await
                 };

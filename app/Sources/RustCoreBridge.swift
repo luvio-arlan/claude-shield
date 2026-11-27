@@ -19,16 +19,18 @@ enum RustCoreBridge {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/claude-guard")
     }
 
+    private static let decoder = JSONDecoder()
+
     static func loadCachedTelemetry() -> TelemetrySnapshot? {
         let url = cacheDir.appendingPathComponent("last_telemetry.json")
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(TelemetrySnapshot.self, from: data)
+        return try? decoder.decode(TelemetrySnapshot.self, from: data)
     }
 
     static func loadCachedPurity() -> PurityReport? {
         let url = cacheDir.appendingPathComponent("last_purity.json")
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(PurityReport.self, from: data)
+        return try? decoder.decode(PurityReport.self, from: data)
     }
 
     static func runCore(_ args: [String]) -> Data? {
@@ -50,13 +52,13 @@ enum RustCoreBridge {
         }
     }
 
-    static func fetchTelemetry(mode: TelemetryProbeMode = .full, resetPool: Bool = false) -> TelemetrySnapshot? {
-        if let snap = CoreWorkerClient.shared.fetchTelemetry(mode: mode, resetPool: resetPool) {
+    static func fetchTelemetry(mode: TelemetryProbeMode = .full, resetPool: Bool = false, skipApi: Bool = false) -> TelemetrySnapshot? {
+        if let snap = CoreWorkerClient.shared.fetchTelemetry(mode: mode, resetPool: resetPool, skipApi: skipApi) {
             return snap
         }
         let args = mode == .light ? ["telemetry", "--light"] : ["telemetry"]
         guard let data = runCore(args) else { return nil }
-        return try? JSONDecoder().decode(TelemetrySnapshot.self, from: data)
+        return try? decoder.decode(TelemetrySnapshot.self, from: data)
     }
 
     static func fetchLocalDefenses() -> LocalDefenseModel? {
@@ -64,7 +66,7 @@ enum RustCoreBridge {
             return defenses
         }
         guard let data = runCore(["defenses"]) else { return nil }
-        return try? JSONDecoder().decode(LocalDefenseModel.self, from: data)
+        return try? decoder.decode(LocalDefenseModel.self, from: data)
     }
 
     static func fetchPurity() -> PurityReport? {
@@ -72,7 +74,7 @@ enum RustCoreBridge {
             return report
         }
         guard let data = runCore(["purity", "--json"]) else { return nil }
-        return try? JSONDecoder().decode(PurityReport.self, from: data)
+        return try? decoder.decode(PurityReport.self, from: data)
     }
 
     static func runPatrol(notify: Bool, autoKill: Bool) -> PatrolReportModel? {
@@ -83,7 +85,7 @@ enum RustCoreBridge {
         if notify { args.append("--notify") }
         if !autoKill { args.append("--no-kill") }
         guard let data = runCore(args) else { return nil }
-        return try? JSONDecoder().decode(PatrolReportModel.self, from: data)
+        return try? decoder.decode(PatrolReportModel.self, from: data)
     }
 
     static func fetchGate(resetPool: Bool = false) -> GateResultModel? {
@@ -91,7 +93,19 @@ enum RustCoreBridge {
             return gate
         }
         guard let data = runCore(["gate", "--json"]) else { return nil }
-        return try? JSONDecoder().decode(GateResultModel.self, from: data)
+        return try? decoder.decode(GateResultModel.self, from: data)
+    }
+
+    static func launchDesktop(skipGate: Bool, verifiedIP: String?) -> LaunchDesktopOutcomeModel? {
+        CoreWorkerClient.shared.launchDesktop(skipGate: skipGate, verifiedIP: verifiedIP)
+    }
+
+    static func killClaude(includeCLI: Bool) -> KillOutcomeModel? {
+        CoreWorkerClient.shared.killClaude(includeCLI: includeCLI)
+    }
+
+    static func killPIDs(_ pids: [String]) -> Int {
+        CoreWorkerClient.shared.killPIDs(pids)
     }
 
     static func resetWorkerPool() {

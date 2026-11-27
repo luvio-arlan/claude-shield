@@ -20,13 +20,23 @@ final class SetupWizardState: ObservableObject {
     @Published var setupReport: SetupReportModel?
     @Published var errorMessage: String?
 
+    private var lastSyncedIP: String
+    private var lastSyncedPort: String
+    private var lastSyncedTZ: String
+
     init(isFirstRun: Bool, currentSnapshot: TelemetrySnapshot) {
         self.isFirstRun = isFirstRun
-        if currentSnapshot.expected_ip != "未配置" && currentSnapshot.expected_ip != "检测中..." {
-            self.expectedIP = currentSnapshot.expected_ip
-        }
-        self.proxyPortText = String(currentSnapshot.proxy_port)
-        self.targetTZ = currentSnapshot.target_tz
+        let initIP = (currentSnapshot.expected_ip != "未配置" && currentSnapshot.expected_ip != "检测中...")
+            ? currentSnapshot.expected_ip
+            : ""
+        let initPort = String(currentSnapshot.proxy_port)
+        let initTZ = currentSnapshot.target_tz
+        self.expectedIP = initIP
+        self.proxyPortText = initPort
+        self.targetTZ = initTZ
+        self.lastSyncedIP = initIP
+        self.lastSyncedPort = initPort
+        self.lastSyncedTZ = initTZ
         self.hideOriginal = isFirstRun ? true : currentSnapshot.defenses.hideOriginalPreference
         self.enableAutostart = isFirstRun ? true : currentSnapshot.defenses.login_item_enabled
         self.enableDailyPatrol = isFirstRun ? true : currentSnapshot.defenses.daily_patrol_enabled
@@ -35,6 +45,21 @@ final class SetupWizardState: ObservableObject {
     func syncFromSnapshot(_ snapshot: TelemetrySnapshot) {
         guard !isApplying && !isDetecting else { return }
         if !isFirstRun {
+            if snapshot.expected_ip != "未配置" && snapshot.expected_ip != "检测中..." {
+                if expectedIP.isEmpty || expectedIP == lastSyncedIP {
+                    expectedIP = snapshot.expected_ip
+                }
+                lastSyncedIP = snapshot.expected_ip
+            }
+            let snapPort = String(snapshot.proxy_port)
+            if proxyPortText == lastSyncedPort {
+                proxyPortText = snapPort
+            }
+            lastSyncedPort = snapPort
+            if targetTZ == lastSyncedTZ {
+                targetTZ = snapshot.target_tz
+            }
+            lastSyncedTZ = snapshot.target_tz
             hideOriginal = snapshot.defenses.hideOriginalPreference
             enableAutostart = snapshot.defenses.login_item_enabled
             enableDailyPatrol = snapshot.defenses.daily_patrol_enabled

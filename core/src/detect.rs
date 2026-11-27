@@ -67,7 +67,36 @@ pub fn find_real_claude_cli(home: &Path) -> Option<String> {
         }
     }
 
+    // Native Claude Code installer: ~/.local/share/claude/versions/<latest>
+    let versions_dir = home.join(".local/share/claude/versions");
+    if let Ok(entries) = fs::read_dir(&versions_dir) {
+        let mut versions: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| is_exec_and_not_shield(p))
+            .collect();
+        versions.sort();
+        if let Some(latest) = versions.pop() {
+            return Some(latest.to_string_lossy().to_string());
+        }
+    }
+
     None
+}
+
+pub fn is_shield_managed_wrapper(path: &Path) -> bool {
+    if let Ok(bytes) = fs::read(path) {
+        if bytes.len() < 8192 {
+            let text = String::from_utf8_lossy(&bytes);
+            if text.contains("claude-shield-core")
+                || text.contains("claude-guard.sh")
+                || text.contains("Claude Shield Managed Wrapper")
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn is_exec_and_not_shield(path: &Path) -> bool {
@@ -77,15 +106,7 @@ fn is_exec_and_not_shield(path: &Path) -> bool {
     if !is_exec {
         return false;
     }
-    if let Ok(bytes) = fs::read(path) {
-        if bytes.len() < 8192 {
-            let text = String::from_utf8_lossy(&bytes);
-            if text.contains("claude-shield-core") || text.contains("claude-guard.sh") {
-                return false;
-            }
-        }
-    }
-    true
+    !is_shield_managed_wrapper(path)
 }
 
 pub async fn detect_environment(cfg: &ShieldConfig, preferred_port: Option<u16>) -> DetectResult {
@@ -140,16 +161,32 @@ pub async fn detect_environment(cfg: &ShieldConfig, preferred_port: Option<u16>)
     };
 
     let mut detected_tz = cfg.target_tz.clone();
-    let mut country_code = proxy_probe.loc.clone().unwrap_or_default();
+    let mut country_code = proxy_probe
+        .loc
+        .clone()
+        .or_else(|| tun_probe.loc.clone())
+        .unwrap_or_default();
     let mut city = String::new();
     let mut isp = String::new();
 
     if !exit_ip.is_empty() {
-        if let Some(client) = proxy_client.as_ref().or(direct_client.as_ref()) {
-            let ip_api_url = format!(
-                "http://ip-api.com/json/{}?fields=status,countryCode,city,timezone,isp",
-                exit_ip
-            );
+        // Select only a verified-reachable transport; `build_proxy_client` returns `Some` even
+        // when the local proxy port is closed, so fall back to `direct_client` when proxy failed.
+        let mut geo_clients: Vec<&reqwest::Client> = Vec::with_capacity(2);
+        if proxy_probe.reachable {
+            if let Some(pc) = proxy_client.as_ref() {
+                geo_clients.push(pc);
+            }
+        }
+        if let Some(dc) = direct_client.as_ref() {
+            geo_clients.push(dc);
+        }
+
+        let ip_api_url = format!(
+            "http://ip-api.com/json/{}?fields=status,countryCode,city,timezone,isp",
+            exit_ip
+        );
+        for client in &geo_clients {
             if let Ok(resp) = client.get(&ip_api_url).send().await {
                 if let Ok(val) = resp.json::<serde_json::Value>().await {
                     if val.get("status").and_then(|s| s.as_str()) == Some("success") {
@@ -165,11 +202,14 @@ pub async fn detect_environment(cfg: &ShieldConfig, preferred_port: Option<u16>)
                         if let Some(i) = val.get("isp").and_then(|s| s.as_str()) {
                             isp = i.to_string();
                         }
+                        break;
                     }
                 }
             }
-            if city.is_empty() {
-                let ipinfo_url = format!("https://ipinfo.io/{}/json", exit_ip);
+        }
+        if city.is_empty() {
+            let ipinfo_url = format!("https://ipinfo.io/{}/json", exit_ip);
+            for client in &geo_clients {
                 if let Ok(resp) = client.get(&ipinfo_url).send().await {
                     if let Ok(val) = resp.json::<serde_json::Value>().await {
                         if let Some(tz) = val.get("timezone").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
@@ -184,6 +224,7 @@ pub async fn detect_environment(cfg: &ShieldConfig, preferred_port: Option<u16>)
                         if let Some(org) = val.get("org").and_then(|s| s.as_str()) {
                             isp = org.to_string();
                         }
+                        break;
                     }
                 }
             }
