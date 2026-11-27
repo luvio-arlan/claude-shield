@@ -26,30 +26,19 @@ struct LaunchGuardView: View {
     @StateObject private var recheckHover = LocalState(false)
 
     private var isDark: Bool { colorScheme == .dark }
+    private var palette: ShieldPalette { ShieldPalette(isDark: isDark) }
     private var ctx: LaunchGuardContext { state.context }
 
-    private var safeGreen: Color {
-        isDark ? Color(red: 0.22, green: 0.84, blue: 0.60) : Color(red: 0.04, green: 0.54, blue: 0.36)
-    }
-    private var dangerRed: Color {
-        isDark ? Color(red: 0.98, green: 0.40, blue: 0.42) : Color(red: 0.84, green: 0.16, blue: 0.16)
-    }
-    private var warnAmber: Color {
-        isDark ? Color(red: 0.98, green: 0.72, blue: 0.24) : Color(red: 0.78, green: 0.42, blue: 0.04)
-    }
+    private var safeGreen: Color { palette.safeGreen }
+    private var dangerRed: Color { palette.dangerRed }
+    private var warnAmber: Color { palette.warnAmber }
     private var accentColor: Color {
         if state.passedAndLaunching { return safeGreen }
         return ctx.isCritical ? dangerRed : warnAmber
     }
-    private var cardSurface: Color {
-        isDark ? Color.white.opacity(0.065) : Color.white.opacity(0.76)
-    }
-    private var cardBorder: Color {
-        isDark ? Color.white.opacity(0.11) : Color.black.opacity(0.08)
-    }
-    private var labelColor: Color {
-        isDark ? Color.white.opacity(0.62) : Color.black.opacity(0.56)
-    }
+    private var cardSurface: Color { palette.popoverCardSurface }
+    private var cardBorder: Color { palette.cardBorder }
+    private var labelColor: Color { palette.labelColor }
 
     private func purityColor(_ score: Int) -> Color {
         ShieldMetricsStyle.purityColor(score, safe: safeGreen, warn: warnAmber, danger: dangerRed)

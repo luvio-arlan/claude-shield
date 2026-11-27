@@ -187,6 +187,17 @@ def check_rust_guardrails(errors: list[str]) -> None:
                 "Use `#[tokio::main(flavor = \"current_thread\")]` to avoid spawning idle multi-thread worker pools in a lightweight daemon.",
             )
         )
+    probe_rs = ROOT / "core" / "src" / "probe.rs"
+    if probe_rs.exists():
+        probe_text = probe_rs.read_text(encoding="utf-8")
+        if "http2_keep_alive_interval" not in probe_text or "http2_keep_alive_while_idle(true)" not in probe_text:
+            errors.append(
+                fail(
+                    "HTTP2_KEEPALIVE_REQUIRED",
+                    "core/src/probe.rs does not enable HTTP/2 keep-alive PING frames while idle.",
+                    "Configure `.http2_keep_alive_interval(...)` and `.http2_keep_alive_while_idle(true)` so pooled sockets never silently drop and spike latency.",
+                )
+            )
     for path in rust_files():
         rel = path.relative_to(ROOT).as_posix()
         text = path.read_text(encoding="utf-8")

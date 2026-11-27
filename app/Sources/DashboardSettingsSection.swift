@@ -77,11 +77,11 @@ extension ShieldDashboardView {
                 HStack(spacing: 10) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(brandTerracotta.opacity(isDark ? 0.20 : 0.12))
+                            .fill(titaniumAccent.opacity(isDark ? 0.20 : 0.12))
                             .frame(width: 34, height: 34)
                         Image(systemName: "arrow.down.circle.fill")
                             .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(brandTerracotta)
+                            .foregroundColor(titaniumAccent)
                     }
 
                     VStack(alignment: .leading, spacing: 2.5) {
@@ -131,10 +131,10 @@ extension ShieldDashboardView {
                                     Text(info.zipDownloadURL != nil ? "立即更新" : "前往下载")
                                         .font(.system(size: 12, weight: .semibold))
                                 }
-                                .foregroundColor(.white)
+                                .foregroundColor(palette.primaryCTAForeground)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
-                                .background(Capsule().fill(brandGradient))
+                                .background(Capsule().fill(palette.primaryCTAGradient))
                             }
                             .buttonStyle(SnappyButtonStyle(scale: 0.96))
                         }
@@ -145,10 +145,10 @@ extension ShieldDashboardView {
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             Capsule()
-                                .fill(brandTerracotta.opacity(isDark ? 0.20 : 0.14))
+                                .fill(titaniumAccent.opacity(isDark ? 0.20 : 0.14))
                                 .frame(height: 5)
                             Capsule()
-                                .fill(brandGradient)
+                                .fill(titaniumAccent)
                                 .frame(width: max(10, geo.size.width * CGFloat(progress)), height: 5)
                                 .animation(.easeOut(duration: 0.18), value: progress)
                         }
@@ -160,11 +160,11 @@ extension ShieldDashboardView {
             .padding(.vertical, 13)
             .background(
                 RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(brandTerracotta.opacity(isDark ? 0.12 : 0.07))
+                    .fill(titaniumAccent.opacity(isDark ? 0.12 : 0.07))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .strokeBorder(brandTerracotta.opacity(isDark ? 0.35 : 0.26), lineWidth: 0.9)
+                    .strokeBorder(titaniumAccent.opacity(isDark ? 0.35 : 0.24), lineWidth: 0.9)
             )
         } else if case .failed(let msg) = vm.updatePhase {
             HStack(spacing: 8) {
@@ -179,10 +179,10 @@ extension ShieldDashboardView {
                 Button("重试") { vm.checkForUpdates(manual: true) }
                     .buttonStyle(SnappyButtonStyle(scale: 0.96))
                     .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundColor(brandTerracotta)
+                    .foregroundColor(titaniumAccent)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4.5)
-                    .background(Capsule().fill(brandTerracotta.opacity(isDark ? 0.18 : 0.11)))
+                    .background(Capsule().fill(titaniumAccent.opacity(isDark ? 0.18 : 0.11)))
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -205,7 +205,7 @@ extension ShieldDashboardView {
     var updatePillForeground: Color {
         switch vm.updatePhase {
         case .upToDate: return safeGreen
-        case .available, .downloading, .installing: return brandTerracotta
+        case .available, .downloading, .installing: return titaniumAccent
         default: return updateHover.value ? .primary : labelColor
         }
     }
@@ -215,7 +215,7 @@ extension ShieldDashboardView {
         case .upToDate:
             return safeGreen.opacity(isDark ? 0.18 : 0.11)
         case .available, .downloading, .installing:
-            return brandTerracotta.opacity(updateHover.value ? (isDark ? 0.28 : 0.18) : (isDark ? 0.20 : 0.12))
+            return titaniumAccent.opacity(updateHover.value ? (isDark ? 0.28 : 0.18) : (isDark ? 0.20 : 0.12))
         default:
             return updateHover.value
                 ? (isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
@@ -229,10 +229,10 @@ extension ShieldDashboardView {
                 HStack(spacing: 7) {
                     Image(systemName: "network.badge.shield.half.filled")
                         .font(.system(size: 14.5, weight: .semibold))
-                        .foregroundColor(brandTerracotta)
+                        .foregroundColor(titaniumAccent)
                     Text("网络与地区")
                         .font(.system(size: 14.5, weight: .bold))
-                        .foregroundColor(.primary)
+                        .foregroundColor(inkPrimary)
                 }
 
                 Spacer()
@@ -248,12 +248,12 @@ extension ShieldDashboardView {
                         Text(state.isDetecting ? "正在探测..." : "自动识别节点")
                             .font(.system(size: 12, weight: .semibold))
                     }
-                    .foregroundColor(brandTerracotta)
+                    .foregroundColor(titaniumAccent)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(
                         Capsule().fill(
-                            brandTerracotta.opacity(detectHover.value ? (isDark ? 0.26 : 0.17) : (isDark ? 0.16 : 0.10))
+                            titaniumAccent.opacity(detectHover.value ? (isDark ? 0.24 : 0.16) : (isDark ? 0.15 : 0.10))
                         )
                     )
                 }
@@ -327,14 +327,14 @@ extension ShieldDashboardView {
                         }
                         .buttonStyle(SnappyButtonStyle(scale: 0.96))
                         .font(.system(size: 11.5, weight: selected ? .semibold : .medium))
-                        .foregroundColor(selected ? .white : .primary.opacity(0.78))
+                        .foregroundColor(selected ? palette.primaryCTAForeground : inkPrimary.opacity(0.76))
                         .padding(.horizontal, 11)
                         .padding(.vertical, 5)
                         .background(
                             Capsule().fill(
                                 selected
-                                    ? AnyShapeStyle(brandGradient)
-                                    : AnyShapeStyle(isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.045))
+                                    ? AnyShapeStyle(palette.primaryCTAGradient)
+                                    : AnyShapeStyle(palette.recessedTray)
                             )
                         )
                     }
@@ -346,8 +346,8 @@ extension ShieldDashboardView {
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 15, style: .continuous).fill(cardSurface))
-        .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.85))
-        .shadow(color: cardShadow, radius: 5, y: 2)
+        .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).strokeBorder(palette.cardSpecularBorder, lineWidth: 0.85))
+        .shadow(color: cardShadow, radius: 7, y: 2)
     }
 
     private func policyRow(
@@ -359,17 +359,17 @@ extension ShieldDashboardView {
         HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(brandTerracotta.opacity(isDark ? 0.16 : 0.10))
+                    .fill(titaniumAccent.opacity(isDark ? 0.16 : 0.10))
                     .frame(width: 34, height: 34)
                 Image(systemName: icon)
                     .font(.system(size: 14.5, weight: .semibold))
-                    .foregroundColor(brandTerracotta)
+                    .foregroundColor(titaniumAccent)
             }
 
             VStack(alignment: .leading, spacing: 2.5) {
                 Text(title)
                     .font(.system(size: 13.5, weight: .semibold))
-                    .foregroundColor(.primary)
+                    .foregroundColor(inkPrimary)
                 Text(subtitle)
                     .font(.system(size: 11.5, weight: .regular))
                     .foregroundColor(labelColor)
@@ -381,7 +381,7 @@ extension ShieldDashboardView {
             Toggle("", isOn: isOn)
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .tint(brandTerracotta)
+                .tint(safeGreen)
                 .controlSize(.regular)
         }
         .padding(.horizontal, 20)
@@ -508,13 +508,17 @@ extension ShieldDashboardView {
                 }
                 .padding(.horizontal, 24)
                 .frame(height: 38)
-                .foregroundColor(.white)
+                .foregroundColor(palette.primaryCTAForeground)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(brandGradient)
-                        .brightness(saveHover.value ? 0.04 : 0)
+                        .fill(palette.primaryCTAGradient)
+                        .brightness(saveHover.value ? (isDark ? -0.04 : 0.06) : 0)
                 )
-                .shadow(color: brandTerracotta.opacity(saveHover.value ? 0.28 : 0.16), radius: 6, y: 2)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(palette.primaryCTABorder, lineWidth: 0.7)
+                )
+                .shadow(color: palette.primaryCTAShadow, radius: saveHover.value ? 8 : 5, y: 2)
             }
             .buttonStyle(SnappyButtonStyle(scale: 0.98))
             .onHover { h in withAnimation(.easeOut(duration: 0.12)) { saveHover.value = h } }
@@ -605,9 +609,10 @@ extension ShieldDashboardView {
                     }
                     .frame(maxWidth: .infinity)
                     .frame(height: 44)
-                    .foregroundColor(.white)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(brandGradient))
-                    .shadow(color: Color(red: 0.75, green: 0.31, blue: 0.18).opacity(0.28), radius: 8, y: 3)
+                    .foregroundColor(palette.primaryCTAForeground)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(palette.primaryCTAGradient))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(palette.primaryCTABorder, lineWidth: 0.75))
+                    .shadow(color: palette.primaryCTAShadow, radius: 8, y: 3)
                 }
                 .buttonStyle(SnappyButtonStyle(scale: 0.985))
             }

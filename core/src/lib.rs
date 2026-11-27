@@ -2,6 +2,7 @@ pub mod config;
 pub mod detect;
 pub mod ffi;
 pub mod guard;
+pub mod latency;
 pub mod patrol;
 pub mod pf_guard;
 pub mod probe;

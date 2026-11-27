@@ -9,49 +9,22 @@ struct ShieldPopoverView: View {
     @Namespace private var tabNamespace
 
     var isDark: Bool { colorScheme == .dark }
+    var palette: ShieldPalette { ShieldPalette(isDark: isDark) }
 
-    var safeGreen: Color {
-        isDark ? Color(red: 0.22, green: 0.84, blue: 0.60) : Color(red: 0.04, green: 0.54, blue: 0.36)
-    }
-
-    var dangerRed: Color {
-        isDark ? Color(red: 0.98, green: 0.42, blue: 0.44) : Color(red: 0.84, green: 0.16, blue: 0.16)
-    }
-
-    var warnAmber: Color {
-        isDark ? Color(red: 0.98, green: 0.72, blue: 0.24) : Color(red: 0.76, green: 0.38, blue: 0.04)
-    }
+    var safeGreen: Color { palette.safeGreen }
+    var dangerRed: Color { palette.dangerRed }
+    var warnAmber: Color { palette.warnAmber }
+    var titaniumAccent: Color { palette.titaniumAccent }
+    var inkPrimary: Color { palette.inkPrimary }
 
     var accentColor: Color {
         vm.snapshot.isSafe ? safeGreen : dangerRed
     }
 
-    var cardSurface: Color {
-        isDark ? Color.white.opacity(0.075) : Color.white.opacity(0.80)
-    }
-
-    var cardBorder: Color {
-        isDark ? Color.white.opacity(0.11) : Color.black.opacity(0.08)
-    }
-
-    var cardShadow: Color {
-        isDark ? Color.clear : Color.black.opacity(0.05)
-    }
-
-    var labelColor: Color {
-        isDark ? Color.white.opacity(0.65) : Color.black.opacity(0.58)
-    }
-
-    var brandGradient: LinearGradient {
-        LinearGradient(
-            colors: [
-                Color(red: 0.86, green: 0.43, blue: 0.27),
-                Color(red: 0.75, green: 0.31, blue: 0.18)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
+    var cardSurface: Color { palette.popoverCardSurface }
+    var cardBorder: Color { palette.cardBorder }
+    var cardShadow: Color { palette.cardShadow }
+    var labelColor: Color { palette.labelColor }
 
     func purityColor(_ score: Int) -> Color {
         ShieldMetricsStyle.purityColor(score, safe: safeGreen, warn: warnAmber, danger: dangerRed)
@@ -111,7 +84,15 @@ struct ShieldPopoverView: View {
         }
         .frame(width: 400)
         .fixedSize(horizontal: false, vertical: true)
-        .background(VisualEffectView(material: .popover, blendingMode: .behindWindow))
+        .background(
+            ZStack(alignment: .top) {
+                VisualEffectView(material: .popover, blendingMode: .behindWindow)
+                palette.popoverGlassWash
+                palette.topAtmosphereGlow(isSafe: vm.snapshot.isSafe)
+                    .frame(height: 150)
+                    .allowsHitTesting(false)
+            }
+        )
     }
 
     @ViewBuilder
@@ -161,21 +142,21 @@ struct ShieldPopoverView: View {
                 HStack(spacing: 6) {
                     Text(vm.snapshot.isSafe ? "SHIELD ARMED" : "IP 异常预警")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
+                        .foregroundColor(inkPrimary)
 
                     Text(vm.snapshot.isSafe ? "Rust 内核锁死" : "熔断就绪")
                         .font(.system(size: 9.5, weight: .semibold))
                         .foregroundColor(accentColor)
                         .padding(.horizontal, 6.5)
                         .padding(.vertical, 2)
-                        .background(Capsule().fill(accentColor.opacity(isDark ? 0.22 : 0.12)))
-                        .overlay(Capsule().strokeBorder(accentColor.opacity(isDark ? 0.35 : 0.28), lineWidth: 0.6))
+                        .background(Capsule().fill(accentColor.opacity(isDark ? 0.18 : 0.10)))
+                        .overlay(Capsule().strokeBorder(accentColor.opacity(isDark ? 0.30 : 0.20), lineWidth: 0.6))
                 }
 
                 HStack(spacing: 5) {
                     Text(vm.snapshot.expected_ip)
                         .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.primary.opacity(0.86))
+                        .foregroundColor(inkPrimary.opacity(0.82))
                     if let apiMs = vm.snapshot.api_latency.warm_rtt_ms {
                         let jitter = vm.snapshot.api_latency.jitter_ms
                         let jitterText = jitter.map { " ±\($0)" } ?? ""
@@ -198,23 +179,29 @@ struct ShieldPopoverView: View {
                 Button(action: {
                     selectTab(vm.selectedTab == .radar ? .purity : .radar)
                 }) {
-                    VStack(alignment: .trailing, spacing: 1) {
-                        HStack(spacing: 3) {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        HStack(spacing: 3.5) {
                             Text("\(p.purity_score)")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .font(.system(size: 15.5, weight: .bold, design: .rounded))
                                 .foregroundColor(pc)
                             Text(p.grade)
-                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                                .font(.system(size: 9.5, weight: .heavy, design: .rounded))
                                 .foregroundColor(.white)
                                 .padding(.horizontal, 4.5)
                                 .padding(.vertical, 1)
-                                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(pc))
+                                .background(RoundedRectangle(cornerRadius: 4.5, style: .continuous).fill(pc))
                         }
                         Text("IP 纯净度")
                             .font(.system(size: 9.5, weight: .medium))
                             .foregroundColor(labelColor)
                     }
-                    .contentShape(Rectangle())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(pc.opacity(isDark ? 0.13 : 0.08))
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 }
                 .buttonStyle(SnappyButtonStyle(scale: 0.95))
                 .help("点击切换 IP 纯净度深度体检面板")
@@ -229,15 +216,16 @@ struct ShieldPopoverView: View {
                 }
             }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(cardSurface)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .fill(
                             LinearGradient(
-                                colors: [accentColor.opacity(isDark ? 0.16 : 0.09), Color.clear],
+                                colors: [accentColor.opacity(isDark ? 0.12 : 0.06), Color.clear],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
@@ -245,36 +233,36 @@ struct ShieldPopoverView: View {
                 )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(accentColor.opacity(isDark ? 0.38 : 0.30), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(accentColor.opacity(isDark ? 0.28 : 0.22), lineWidth: 0.85)
         )
-        .shadow(color: cardShadow, radius: 4, y: 1.5)
+        .shadow(color: cardShadow, radius: 8, y: 2.5)
     }
 
     private func updateBannerCard(_ info: AppUpdateInfo) -> some View {
-        let brandTerracotta = Color(red: 0.85, green: 0.43, blue: 0.27)
+        let accent = titaniumAccent
         return VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(brandTerracotta.opacity(isDark ? 0.22 : 0.13))
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(accent.opacity(isDark ? 0.20 : 0.12))
                         .frame(width: 24, height: 24)
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundColor(brandTerracotta)
+                        .foregroundColor(accent)
                 }
 
                 VStack(alignment: .leading, spacing: 1.5) {
                     HStack(spacing: 5) {
                         Text("发现新版本 \(info.tagName)")
                             .font(.system(size: 11.5, weight: .bold))
-                            .foregroundColor(.primary)
+                            .foregroundColor(inkPrimary)
                         Text("GitHub")
                             .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                            .foregroundColor(brandTerracotta)
+                            .foregroundColor(accent)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(Capsule().fill(brandTerracotta.opacity(isDark ? 0.20 : 0.12)))
+                            .background(Capsule().fill(accent.opacity(isDark ? 0.18 : 0.10)))
                     }
                     Group {
                         switch vm.updatePhase {
@@ -301,10 +289,10 @@ struct ShieldPopoverView: View {
                     Button(action: { vm.performUpdate(info) }) {
                         Text(info.zipDownloadURL != nil ? "立即更新" : "前往下载")
                             .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundColor(.white)
+                            .foregroundColor(palette.primaryCTAForeground)
                             .padding(.horizontal, 9)
                             .padding(.vertical, 4.5)
-                            .background(Capsule().fill(brandGradient))
+                            .background(Capsule().fill(palette.primaryCTAGradient))
                     }
                     .buttonStyle(SnappyButtonStyle(scale: 0.95))
 
@@ -324,10 +312,10 @@ struct ShieldPopoverView: View {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Capsule()
-                            .fill(brandTerracotta.opacity(isDark ? 0.20 : 0.14))
+                            .fill(accent.opacity(isDark ? 0.20 : 0.14))
                             .frame(height: 4)
                         Capsule()
-                            .fill(brandGradient)
+                            .fill(accent)
                             .frame(width: max(8, geo.size.width * CGFloat(progress)), height: 4)
                             .animation(.easeOut(duration: 0.18), value: progress)
                     }
@@ -335,19 +323,19 @@ struct ShieldPopoverView: View {
                 .frame(height: 4)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8.5)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(cardSurface)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(brandTerracotta.opacity(isDark ? 0.08 : 0.05))
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(accent.opacity(isDark ? 0.08 : 0.045))
                 )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(brandTerracotta.opacity(isDark ? 0.36 : 0.28), lineWidth: 0.85)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(accent.opacity(isDark ? 0.30 : 0.22), lineWidth: 0.85)
         )
     }
 
@@ -360,65 +348,55 @@ struct ShieldPopoverView: View {
                     purityScore: vm.purity?.purity_score,
                     scoreColor: purityColor(vm.purity?.purity_score ?? 100),
                     isDark: isDark,
-                    brandGradient: brandGradient,
                     namespace: tabNamespace
                 ) {
                     selectTab(tab)
                 }
             }
         }
-        .padding(3)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.7))
+        .padding(3.5)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(palette.recessedTray))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.65))
     }
 
     private var footerBar: some View {
         HStack(spacing: 8) {
             Text("\(AppReleaseConfig.shortDisplayVersion) · 更新 \(vm.snapshot.checked_at)")
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundColor(labelColor)
+                .foregroundColor(palette.subtleLabelColor)
                 .lineLimit(1)
             Spacer(minLength: 4)
             Button(action: {
                 let target: ShieldDashboardSection = vm.selectedTab == .purity ? .purity : .radar
                 vm.openDashboard(section: target, isFirstRun: false)
             }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "macwindow")
-                        .font(.system(size: 9.5, weight: .semibold))
-                    Text("控制台")
-                        .font(.system(size: 10.5, weight: .semibold))
-                }
-                .foregroundColor(Color(red: 0.80, green: 0.41, blue: 0.27))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(
-                    Capsule().fill(Color(red: 0.80, green: 0.41, blue: 0.27).opacity(isDark ? 0.18 : 0.10))
-                )
-            }
-            .buttonStyle(SnappyButtonStyle(scale: 0.95))
-            .help("打开独立控制台窗口（支持拖动、缩放与收至状态栏）")
-
-            Button(action: { vm.openSetupWizard(isFirstRun: false) }) {
-                HStack(spacing: 4) {
+                HStack(spacing: 4.5) {
                     ZStack(alignment: .topTrailing) {
-                        Image(systemName: "gearshape.fill")
+                        Image(systemName: "macwindow")
                             .font(.system(size: 10, weight: .semibold))
                         if vm.availableUpdate != nil {
                             Circle()
-                                .fill(Color(red: 0.80, green: 0.41, blue: 0.27))
-                                .frame(width: 5.5, height: 5.5)
+                                .fill(safeGreen)
+                                .frame(width: 5, height: 5)
                                 .offset(x: 2.5, y: -2)
                         }
                     }
-                    Text("防护设置")
+                    Text("控制台")
                         .font(.system(size: 10.5, weight: .semibold))
                 }
-                .foregroundColor(labelColor)
+                .foregroundColor(titaniumAccent)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule().fill(palette.jadePillFill)
+                )
+                .overlay(
+                    Capsule().strokeBorder(palette.jadePillBorder, lineWidth: 0.7)
+                )
             }
             .buttonStyle(SnappyButtonStyle(scale: 0.95))
-            .help("打开控制台防护设置：管理出口 IP 白名单、时区对齐、自动更新与卸载还原")
+            .help("打开独立控制台窗口（含实时雷达、纯净度体检与防护设置）")
         }
-        .padding(.top, 1)
+        .padding(.top, 2)
     }
 }

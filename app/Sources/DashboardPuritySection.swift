@@ -75,11 +75,12 @@ extension ShieldDashboardView {
                             Text(vm.isAuditing ? "体检中..." : "重新体检")
                                 .font(.system(size: 12, weight: .semibold))
                         }
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 13)
+                        .foregroundColor(palette.primaryCTAForeground)
+                        .padding(.horizontal, 14)
                         .frame(height: 34)
-                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(brandGradient))
-                        .shadow(color: brandTerracotta.opacity(0.18), radius: 5, y: 2)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(palette.primaryCTAGradient))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(palette.primaryCTABorder, lineWidth: 0.7))
+                        .shadow(color: palette.primaryCTAShadow, radius: 5, y: 2)
                     }
                     .buttonStyle(SnappyButtonStyle(scale: 0.97))
                     .disabled(vm.isAuditing)

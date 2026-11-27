@@ -1,25 +1,9 @@
 import Cocoa
 import SwiftUI
 
-// MARK: - ShieldViewModel Secondary Actions (Screenshot, Updates & Uninstall)
+// MARK: - ShieldViewModel Secondary Actions (Navigation, Updates & Uninstall)
 
 extension ShieldViewModel {
-    func copyDiagnosticScreenshot(_ pngData: Data?) {
-        guard let pngData = pngData, let image = NSImage(data: pngData) else {
-            showToast("截图生成失败，请重试")
-            return
-        }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        let item = NSPasteboardItem()
-        item.setData(pngData, forType: .png)
-        if let tiff = image.tiffRepresentation {
-            item.setData(tiff, forType: .tiff)
-        }
-        pb.writeObjects([item])
-        showToast("2x 高清诊断截图已复制，可直接 ⌘V 粘贴")
-    }
-
     func openSetupWizard(isFirstRun: Bool = false) {
         openDashboard(section: .settings, isFirstRun: isFirstRun)
     }

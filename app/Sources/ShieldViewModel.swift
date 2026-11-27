@@ -64,6 +64,8 @@ final class ShieldViewModel: ObservableObject {
     private var isSystemAsleep: Bool = false
     private var isLowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
     private var isAuditingDefenses: Bool = false
+    private var isProbeInFlight: Bool = false
+    private var pendingRefresh: (mode: TelemetryProbeMode, resetPool: Bool, userInitiated: Bool)?
 
     var isUIVisible: Bool { isPopoverVisible || isDashboardVisible }
 
@@ -96,9 +98,9 @@ final class ShieldViewModel: ObservableObject {
         isPopoverVisible = visible
         rescheduleTimer()
         if visible {
-            let needsFull = lastFullRefreshAt.map { Date().timeIntervalSince($0) >= 4.0 } ?? true
-            if needsFull {
-                refresh(force: true, mode: .full)
+            let needsLive = lastRefreshAt.map { Date().timeIntervalSince($0) >= 2.2 } ?? true
+            if needsLive {
+                refresh(force: true, mode: .light, userInitiated: false)
             }
         }
     }
@@ -108,9 +110,9 @@ final class ShieldViewModel: ObservableObject {
         isDashboardVisible = visible
         rescheduleTimer()
         if visible {
-            let needsFull = lastFullRefreshAt.map { Date().timeIntervalSince($0) >= 4.0 } ?? true
-            if needsFull {
-                refresh(force: true, mode: .full)
+            let needsLive = lastRefreshAt.map { Date().timeIntervalSince($0) >= 2.2 } ?? true
+            if needsLive {
+                refresh(force: true, mode: .light, userInitiated: false)
             }
         }
     }
@@ -120,17 +122,15 @@ final class ShieldViewModel: ObservableObject {
             return nil
         }
         if isUIVisible {
-            return 15.0
-        }
-        let hasEventWatch = mihomoMonitor.hasRealtimeWatch
-        if snapshot.desktopRunning || !snapshot.isSafe {
-            if isLowPowerMode { return 45.0 }
-            return hasEventWatch ? 45.0 : 25.0
+            return 3.0
         }
         if isLowPowerMode {
-            return 180.0
+            return 15.0
         }
-        return hasEventWatch ? 120.0 : 60.0
+        if snapshot.desktopRunning || !snapshot.isSafe {
+            return 4.0
+        }
+        return 5.0
     }
 
     private func rescheduleTimer() {
@@ -146,11 +146,10 @@ final class ShieldViewModel: ObservableObject {
         let newTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self = self, !self.isSystemAsleep else { return }
-                let mode: TelemetryProbeMode = self.isUIVisible ? .full : .light
-                self.refresh(force: false, mode: mode)
+                self.refresh(force: false, mode: .light, userInitiated: false)
             }
         }
-        newTimer.tolerance = interval * 0.2
+        newTimer.tolerance = min(interval * 0.15, 1.0)
         timer = newTimer
     }
 
@@ -398,56 +397,95 @@ final class ShieldViewModel: ObservableObject {
         }
     }
 
-    func refresh(force: Bool = false, mode: TelemetryProbeMode? = nil, resetPool: Bool = false) {
-        guard !isRefreshing else { return }
-        let resolvedMode: TelemetryProbeMode = mode ?? ((isUIVisible || force) ? .full : .light)
-        if !force, let last = lastRefreshAt, Date().timeIntervalSince(last) < 4.0 {
+    func refresh(
+        force: Bool = false,
+        mode: TelemetryProbeMode? = nil,
+        resetPool: Bool = false,
+        userInitiated: Bool = false
+    ) {
+        let resolvedMode: TelemetryProbeMode = mode ?? (userInitiated ? .full : .light)
+        if isProbeInFlight {
+            if force || userInitiated {
+                let mergedMode: TelemetryProbeMode =
+                    (pendingRefresh?.mode == .full || resolvedMode == .full) ? .full : .light
+                let mergedReset = (pendingRefresh?.resetPool ?? false) || resetPool
+                let mergedUser = (pendingRefresh?.userInitiated ?? false) || userInitiated
+                pendingRefresh = (mergedMode, mergedReset, mergedUser)
+                if mergedUser {
+                    isRefreshing = true
+                }
+            }
+            return
+        }
+        if !force, !userInitiated, let last = lastRefreshAt, Date().timeIntervalSince(last) < 1.8 {
             return
         }
         lastRefreshAt = Date()
         if resolvedMode == .full {
             lastFullRefreshAt = Date()
         }
-        isRefreshing = true
-        let priority: TaskPriority = isUIVisible || force ? .userInitiated : .background
+        isProbeInFlight = true
+        if userInitiated {
+            isRefreshing = true
+        }
+        let priority: TaskPriority = (isUIVisible || force || userInitiated) ? .userInitiated : .utility
         Task.detached(priority: priority) {
             let result = RustCoreBridge.fetchTelemetry(mode: resolvedMode, resetPool: resetPool)
             await MainActor.run {
-                self.isRefreshing = false
-                guard let result = result else { return }
-                self.snapshot = result
-                self.loginAutoStart = result.defenses.login_item_enabled
-                self.onStatusChange?(result, self.purity)
-                self.rescheduleTimer()
-
-                if result.defenses.original_app_exposed && result.defenses.hideOriginalPreference {
-                    Task.detached(priority: .utility) {
-                        _ = RustCoreBridge.hideOriginalApp()
+                self.isProbeInFlight = false
+                if let next = self.pendingRefresh {
+                    self.pendingRefresh = nil
+                    if !next.userInitiated {
+                        self.isRefreshing = false
                     }
-                }
-
-                if result.isSafe {
-                    self.consecutiveUnreachableCount = 0
+                    self.applyTelemetryResult(result)
+                    self.refresh(
+                        force: true,
+                        mode: next.mode,
+                        resetPool: next.resetPool,
+                        userInitiated: next.userInitiated
+                    )
                     return
                 }
+                self.isRefreshing = false
+                self.applyTelemetryResult(result)
+            }
+        }
+    }
 
-                if self.autoKillOnBreach {
-                    if result.desktopUnprotected {
-                        self.emergencyKillClaude(reason: "检测到未绑定硬代理或未禁 QUIC/WebRTC 的 Claude 桌面版进程（#\(result.defenses.desktop_pid ?? "?")），已自动急停防裸连！")
-                    } else if result.hasUnprotectedCLI {
-                        self.killUnprotectedCLI(pids: result.defenses.unprotected_cli_pids)
-                    } else if result.desktopRunning && result.isConfirmedIPDrift {
-                        self.emergencyKillClaude(reason: "检测到出口 IP 漂移（Claude 边缘: \(result.proxy.ip) / TUN: \(result.tun.ip)），已自动急停 Claude 桌面版！")
-                    } else if result.desktopRunning {
-                        self.consecutiveUnreachableCount += 1
-                        if self.consecutiveUnreachableCount >= 2 {
-                            self.consecutiveUnreachableCount = 0
-                            self.emergencyKillClaude(reason: "连续检测到代理/TUN 通道中断，已自动急停 Claude 桌面版（Fail-Closed）！")
-                        } else {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                                self.refresh(force: true, mode: .light, resetPool: true)
-                            }
-                        }
+    private func applyTelemetryResult(_ result: TelemetrySnapshot?) {
+        guard let result = result else { return }
+        self.snapshot = result
+        self.loginAutoStart = result.defenses.login_item_enabled
+        self.onStatusChange?(result, self.purity)
+        self.rescheduleTimer()
+
+        if result.defenses.original_app_exposed && result.defenses.hideOriginalPreference {
+            Task.detached(priority: .utility) {
+                _ = RustCoreBridge.hideOriginalApp()
+            }
+        }
+
+        if result.isSafe {
+            self.consecutiveUnreachableCount = 0
+            return
+        }
+
+        if self.autoKillOnBreach {
+            if result.desktopUnprotected {
+                self.emergencyKillClaude(reason: "检测到未绑定硬代理或未禁 QUIC/WebRTC 的 Claude 桌面版进程（#\(result.defenses.desktop_pid ?? "?")），已自动急停防裸连！")
+            } else if result.hasUnprotectedCLI {
+                self.killUnprotectedCLI(pids: result.defenses.unprotected_cli_pids)
+            } else if result.desktopRunning && result.isConfirmedIPDrift {
+                self.emergencyKillClaude(reason: "检测到出口 IP 漂移（Claude 边缘: \(result.proxy.ip) / TUN: \(result.tun.ip)），已自动急停 Claude 桌面版！")
+            } else if result.desktopRunning {
+                self.consecutiveUnreachableCount += 1
+                if self.consecutiveUnreachableCount >= 2 {
+                    self.consecutiveUnreachableCount = 0
+                    self.emergencyKillClaude(reason: "连续检测到代理/TUN 通道中断，已自动急停 Claude 桌面版（Fail-Closed）！")
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        self.refresh(force: true, mode: .light, resetPool: true)
                     }
                 }
             }

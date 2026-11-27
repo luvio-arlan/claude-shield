@@ -202,14 +202,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if lastStatusState == state && lastStatusText == text {
             return
         }
-        // Hysteresis in background mode: skip tiny <15ms jitter redraws to avoid WindowServer wakeups
+        // Hysteresis in background mode: skip tiny <3ms noise redraws while keeping live accuracy
         if !viewModel.isUIVisible,
            state == .armed,
            lastStatusState == .armed,
            lastStatusBaseKey == baseKey,
            let prevMs = lastStatusLatencyMs,
            let nextMs = latencyMs,
-           abs(nextMs - prevMs) < 15 {
+           abs(nextMs - prevMs) < 3 {
             return
         }
         guard let button = statusItem.button else { return }

@@ -402,28 +402,28 @@ struct ShieldStatusBadge: View {
 
     var body: some View {
         let tileBgTop = isDark
-            ? Color(red: 0.17, green: 0.165, blue: 0.16)
-            : Color(red: 0.97, green: 0.953, blue: 0.925)
+            ? Color(red: 0.185, green: 0.198, blue: 0.220)
+            : Color.white
         let tileBgBot = isDark
-            ? Color(red: 0.125, green: 0.12, blue: 0.115)
-            : Color(red: 0.925, green: 0.894, blue: 0.843)
+            ? Color(red: 0.125, green: 0.135, blue: 0.152)
+            : Color(red: 0.935, green: 0.940, blue: 0.928)
         let tileBorder = isSafe
-            ? (isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.09))
+            ? (isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.08))
             : accentColor.opacity(isDark ? 0.55 : 0.45)
 
         ZStack {
             PulsingOpacityView(
                 isActive: isActive,
-                duration: 1.9,
-                minOpacity: isDark ? 0.09 : 0.06,
-                maxOpacity: isDark ? 0.24 : 0.16
+                duration: 2.0,
+                minOpacity: isDark ? 0.08 : 0.05,
+                maxOpacity: isDark ? 0.22 : 0.14
             ) {
-                RoundedRectangle(cornerRadius: 13.5, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(accentColor)
             }
             .frame(width: 46, height: 46)
 
-            RoundedRectangle(cornerRadius: 10.5, style: .continuous)
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [tileBgTop, tileBgBot],
@@ -433,10 +433,10 @@ struct ShieldStatusBadge: View {
                 )
                 .frame(width: 38, height: 38)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10.5, style: .continuous)
-                        .strokeBorder(tileBorder, lineWidth: 0.9)
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(tileBorder, lineWidth: 0.85)
                 )
-                .shadow(color: Color.black.opacity(isDark ? 0.30 : 0.09), radius: 4, y: 1.5)
+                .shadow(color: Color.black.opacity(isDark ? 0.30 : 0.075), radius: 5, y: 2)
 
             Image(nsImage: ShieldBrandGraphics.makePopoverBadgeEmblem(isSafe: isSafe, isDark: isDark))
                 .resizable()
@@ -448,7 +448,7 @@ struct ShieldStatusBadge: View {
                 .frame(width: 8.5, height: 8.5)
                 .overlay(
                     Circle()
-                        .strokeBorder(isDark ? Color(red: 0.13, green: 0.14, blue: 0.15) : Color(red: 0.96, green: 0.96, blue: 0.95), lineWidth: 1.8)
+                        .strokeBorder(isDark ? Color(red: 0.13, green: 0.14, blue: 0.16) : Color.white, lineWidth: 1.8)
                 )
                 .shadow(color: accentColor.opacity(0.45), radius: 2.5, y: 0.5)
                 .offset(x: 15.5, y: 15.5)
@@ -513,17 +513,17 @@ struct HoverableActionButton: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 7.5)
+            .padding(.vertical, 8.5)
             .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(fillColor)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(borderColor, lineWidth: 0.8)
             )
-            .shadow(color: cardShadow, radius: 2, y: 1)
-            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .shadow(color: cardShadow, radius: 4, y: 1.5)
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(SnappyButtonStyle())
         .onHover { hovering in
@@ -558,30 +558,31 @@ struct SegmentedTabItemButton: View {
     let purityScore: Int?
     let scoreColor: Color
     let isDark: Bool
-    let brandGradient: LinearGradient
     let namespace: Namespace.ID
     let action: () -> Void
 
     @StateObject private var hoverState = LocalState(false)
 
     var body: some View {
+        let palette = ShieldPalette(isDark: isDark)
         let hovered = hoverState.value && !active
-        let textColor: Color = active ? .white : .primary.opacity(hovered ? 0.92 : 0.72)
-        let hoverFill: Color = isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.045)
+        let textColor: Color = active ? palette.inkPrimary : palette.labelColor.opacity(hovered ? 1.0 : 0.88)
+        let hoverFill: Color = isDark ? Color.white.opacity(0.055) : Color.black.opacity(0.035)
 
         Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: tab == .radar ? "shield.checkered" : "sparkle.magnifyingglass")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 11, weight: active ? .semibold : .medium))
+                    .foregroundColor(active ? palette.titaniumAccent : textColor)
                 Text(tab.rawValue)
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(.system(size: 11.5, weight: active ? .semibold : .medium))
                 if tab == .purity, let score = purityScore {
                     Text("\(score)分")
                         .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(active ? .white.opacity(0.95) : scoreColor)
-                        .padding(.horizontal, 4.5)
+                        .foregroundColor(scoreColor)
+                        .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(Capsule().fill(active ? Color.white.opacity(0.22) : scoreColor.opacity(0.15)))
+                        .background(Capsule().fill(scoreColor.opacity(isDark ? 0.18 : 0.12)))
                 }
             }
             .frame(maxWidth: .infinity)
@@ -590,19 +591,23 @@ struct SegmentedTabItemButton: View {
             .background(
                 ZStack {
                     if active {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(brandGradient)
-                            .shadow(color: Color(red: 0.75, green: 0.31, blue: 0.18).opacity(0.24), radius: 3, y: 1)
+                        RoundedRectangle(cornerRadius: 8.5, style: .continuous)
+                            .fill(palette.activeSegmentFill)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8.5, style: .continuous)
+                                    .strokeBorder(palette.cardSpecularBorder, lineWidth: 0.7)
+                            )
+                            .shadow(color: palette.cardShadow, radius: 4, y: 1.5)
                             .matchedGeometryEffect(id: "activeTabPill", in: namespace)
                     } else if hovered {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        RoundedRectangle(cornerRadius: 8.5, style: .continuous)
                             .fill(hoverFill)
                     }
                 }
             )
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 8.5, style: .continuous))
         }
-        .buttonStyle(SnappyButtonStyle(scale: 0.985, pressedOpacity: 0.92))
+        .buttonStyle(SnappyButtonStyle(scale: 0.985, pressedOpacity: 0.94))
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.12)) {
                 hoverState.value = hovering
@@ -615,15 +620,16 @@ struct PrimaryLaunchButton: View {
     let desktopRunning: Bool
     let isSafe: Bool
     var isLoading: Bool = false
-    let brandGradient: LinearGradient
+    let isDark: Bool
     let action: () -> Void
 
     @StateObject private var hoverState = LocalState(false)
 
     var body: some View {
+        let palette = ShieldPalette(isDark: isDark)
         let hovered = hoverState.value
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: 6.5) {
                 if isLoading {
                     ProgressView()
                         .controlSize(.small)
@@ -637,19 +643,19 @@ struct PrimaryLaunchButton: View {
                     .font(.system(size: 12.5, weight: .semibold))
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
-            .foregroundColor(.white)
+            .padding(.vertical, 9.5)
+            .foregroundColor(isSafe ? palette.primaryCTAForeground : Color.white.opacity(0.92))
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSafe ? AnyShapeStyle(brandGradient) : AnyShapeStyle(Color.gray.opacity(0.65)))
-                    .brightness(hovered ? 0.04 : 0)
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(isSafe ? AnyShapeStyle(palette.primaryCTAGradient) : AnyShapeStyle(Color.gray.opacity(0.62)))
+                    .brightness(hovered ? (isDark ? -0.04 : 0.06) : 0)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.white.opacity(hovered ? 0.28 : 0.18), lineWidth: 0.7)
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(palette.primaryCTABorder, lineWidth: 0.75)
             )
-            .shadow(color: isSafe ? Color(red: 0.75, green: 0.31, blue: 0.18).opacity(hovered ? 0.36 : 0.28) : .clear, radius: hovered ? 6 : 4, y: 2)
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .shadow(color: isSafe ? palette.primaryCTAShadow : .clear, radius: hovered ? 8 : 5, y: 2.5)
+            .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
         .buttonStyle(SnappyButtonStyle(scale: 0.98, pressedOpacity: 0.92))
         .disabled(isLoading)
@@ -687,26 +693,27 @@ struct StyledSettingsInput: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        let accent = Color(red: 0.85, green: 0.43, blue: 0.27)
+        let palette = ShieldPalette(isDark: isDark)
+        let accent = palette.titaniumAccent
         TextField(placeholder, text: $text)
             .textFieldStyle(.plain)
             .focused($isFocused)
             .font(.system(size: 13.5, weight: .medium, design: isMonospaced ? .monospaced : .default))
-            .foregroundColor(.primary)
+            .foregroundColor(palette.inkPrimary)
             .padding(.horizontal, 12)
             .frame(height: 38)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isDark ? Color.black.opacity(0.28) : Color.white.opacity(0.92))
+                    .fill(isDark ? Color.black.opacity(0.28) : Color.white)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
-                        isFocused ? accent.opacity(0.85) : (isDark ? Color.white.opacity(0.13) : Color.black.opacity(0.11)),
+                        isFocused ? accent.opacity(0.85) : palette.cardBorder,
                         lineWidth: isFocused ? 1.5 : 0.9
                     )
             )
-            .shadow(color: isFocused ? accent.opacity(0.16) : .clear, radius: 4, y: 0)
+            .shadow(color: isFocused ? accent.opacity(0.14) : .clear, radius: 4, y: 0)
             .animation(.easeOut(duration: 0.14), value: isFocused)
     }
 }

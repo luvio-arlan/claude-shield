@@ -64,12 +64,12 @@ extension ShieldPopoverView {
                     .lineLimit(1)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8.5)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9.5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.8))
-        .shadow(color: cardShadow, radius: 3, y: 1)
+        .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(cardSurface))
+        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(palette.cardSpecularBorder, lineWidth: 0.85))
+        .shadow(color: cardShadow, radius: 7, y: 2)
     }
 
     var defenseMatrixGrid: some View {
@@ -124,11 +124,11 @@ extension ShieldPopoverView {
 
     private func metricTile(icon: String, title: String, value: String, ok: Bool, dim: Bool = false) -> some View {
         let tint: Color = dim ? labelColor : (ok ? safeGreen : warnAmber)
-        return HStack(spacing: 8) {
+        return HStack(spacing: 8.5) {
             ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(tint.opacity(isDark ? 0.16 : 0.11))
-                    .frame(width: 26, height: 26)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(tint.opacity(isDark ? 0.14 : 0.085))
+                    .frame(width: 27, height: 27)
                 Image(systemName: icon)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(tint)
@@ -140,17 +140,17 @@ extension ShieldPopoverView {
                     .foregroundColor(labelColor)
                 Text(value)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(dim ? labelColor : .primary)
+                    .foregroundColor(dim ? labelColor : inkPrimary)
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 9.5)
+        .padding(.vertical, 7.5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.7))
-        .shadow(color: cardShadow, radius: 2.5, y: 1)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(cardSurface))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(palette.cardSpecularBorder, lineWidth: 0.75))
+        .shadow(color: cardShadow, radius: 5, y: 1.5)
     }
 
     var togglesPanel: some View {
@@ -222,13 +222,14 @@ extension ShieldPopoverView {
             }
             .buttonStyle(SnappyButtonStyle(scale: 0.94, pressedOpacity: 0.95))
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardSurface))
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(cardSurface))
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(isOn ? activeTint.opacity(isDark ? 0.30 : 0.24) : cardBorder, lineWidth: 0.8)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(isOn ? activeTint.opacity(isDark ? 0.24 : 0.16) : cardBorder, lineWidth: 0.8)
         )
+        .shadow(color: cardShadow, radius: 5, y: 1.5)
     }
 
     var purityPanel: some View {
@@ -379,41 +380,25 @@ extension ShieldPopoverView {
     }
 
     var actionButtonsBar: some View {
-        VStack(spacing: 7) {
+        VStack(spacing: 7.5) {
             PrimaryLaunchButton(
                 desktopRunning: vm.snapshot.desktopRunning,
                 isSafe: vm.snapshot.isSafe,
                 isLoading: vm.isCheckingLaunch,
-                brandGradient: brandGradient
+                isDark: isDark
             ) {
                 vm.launchClaudeSafe()
             }
 
-            HStack(spacing: 7) {
+            HStack(spacing: 8) {
                 secondaryActionButton(
                     icon: "arrow.clockwise",
                     title: vm.isRefreshing ? "测速中" : "重新测速",
+                    tint: titaniumAccent,
                     isLoading: vm.isRefreshing,
                     help: "使用 Rust 内核重新测量三点出口 IP 与 Anthropic API 真实 1-RTT"
                 ) {
-                    vm.refresh(force: true)
-                }
-
-                secondaryActionButton(
-                    icon: "sparkle.magnifyingglass",
-                    title: vm.isAuditing ? "体检中" : "全面体检",
-                    isLoading: vm.isAuditing,
-                    help: "执行 IP 纯净度、DNS/IPv6 泄露与本地防线全量体检（含自动修复）"
-                ) {
-                    vm.runFullCheckup()
-                }
-
-                secondaryActionButton(
-                    icon: "camera.viewfinder",
-                    title: "截图诊断",
-                    help: "生成 2x Retina 诊断卡片并复制到剪贴板"
-                ) {
-                    copySnapshotImage()
+                    vm.refresh(force: true, mode: .full, userInitiated: true)
                 }
 
                 if vm.snapshot.desktopRunning {
@@ -454,58 +439,5 @@ extension ShieldPopoverView {
             helpText: help,
             action: action
         )
-    }
-
-    private var diagnosticShareCard: some View {
-        VStack(spacing: 10) {
-            headerCard
-            networkTelemetryRow
-            if let p = vm.purity {
-                HStack(spacing: 6) {
-                    leakPill(title: "纯净度", value: "\(p.purity_score) (\(p.grade))", ok: p.purity_score >= LaunchGuardContext.safePurityThreshold)
-                    leakPill(title: "IP属性", value: p.ip_type, ok: !p.is_hosting && !p.is_proxy_or_vpn)
-                    leakPill(title: "DNS", value: p.dns_leak ? "泄露" : "安全", ok: !p.dns_leak)
-                    leakPill(title: "IPv6", value: p.ipv6_leak ? "泄露" : "封闭", ok: !p.ipv6_leak)
-                }
-            }
-            defenseMatrixGrid
-            HStack {
-                Text("Claude Shield \(AppReleaseConfig.shortDisplayVersion) Rust · \(vm.snapshot.checked_at)")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(labelColor)
-                Spacer()
-                Text(vm.autoKillOnBreach ? "Fail-Closed + 唤醒防护已启" : "Fail-Closed 未启")
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundColor(vm.autoKillOnBreach ? safeGreen : labelColor)
-            }
-        }
-        .padding(16)
-        .frame(width: 404)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: isDark
-                            ? [Color(red: 0.13, green: 0.14, blue: 0.16), Color(red: 0.10, green: 0.11, blue: 0.13)]
-                            : [Color(red: 0.96, green: 0.96, blue: 0.95), Color(red: 0.92, green: 0.93, blue: 0.92)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-        )
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
-        .environment(\.colorScheme, colorScheme)
-    }
-
-    private func copySnapshotImage() {
-        let renderer = ImageRenderer(content: diagnosticShareCard)
-        renderer.scale = 2.0
-        if let cgImage = renderer.cgImage {
-            let rep = NSBitmapImageRep(cgImage: cgImage)
-            let png = rep.representation(using: .png, properties: [:])
-            vm.copyDiagnosticScreenshot(png)
-            return
-        }
-        vm.copyDiagnosticScreenshot(nil)
     }
 }

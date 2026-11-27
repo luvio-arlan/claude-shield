@@ -21,59 +21,24 @@ struct ShieldDashboardView: View {
     @StateObject private var launchHover = LocalState(false)
 
     var isDark: Bool { colorScheme == .dark }
+    var palette: ShieldPalette { ShieldPalette(isDark: isDark) }
 
-    var canvasBg: Color {
-        isDark ? Color(red: 0.095, green: 0.093, blue: 0.090) : Color(red: 0.969, green: 0.961, blue: 0.945)
-    }
-    var sidebarBg: Color {
-        isDark ? Color(red: 0.118, green: 0.115, blue: 0.111) : Color(red: 0.941, green: 0.931, blue: 0.912)
-    }
-    var brandTerracotta: Color {
-        isDark ? Color(red: 0.86, green: 0.48, blue: 0.34) : Color(red: 0.80, green: 0.41, blue: 0.27)
-    }
-    var safeGreen: Color {
-        isDark ? Color(red: 0.26, green: 0.78, blue: 0.58) : Color(red: 0.11, green: 0.53, blue: 0.39)
-    }
-    var dangerRed: Color {
-        isDark ? Color(red: 0.94, green: 0.42, blue: 0.44) : Color(red: 0.80, green: 0.22, blue: 0.22)
-    }
-    var warnAmber: Color {
-        isDark ? Color(red: 0.94, green: 0.70, blue: 0.28) : Color(red: 0.75, green: 0.44, blue: 0.08)
-    }
+    var canvasBg: Color { palette.canvasBg }
+    var sidebarBg: Color { palette.sidebarBg }
+    var titaniumAccent: Color { palette.titaniumAccent }
+    var safeGreen: Color { palette.safeGreen }
+    var dangerRed: Color { palette.dangerRed }
+    var warnAmber: Color { palette.warnAmber }
     var accentColor: Color {
         vm.snapshot.isSafe ? safeGreen : dangerRed
     }
-    var cardSurface: Color {
-        isDark ? Color(red: 0.145, green: 0.142, blue: 0.137) : Color.white
-    }
-    var cardBorder: Color {
-        isDark ? Color.white.opacity(0.075) : Color.black.opacity(0.058)
-    }
-    var cardShadow: Color {
-        isDark ? Color.black.opacity(0.22) : Color.black.opacity(0.032)
-    }
-    var dividerColor: Color {
-        isDark ? Color.white.opacity(0.065) : Color.black.opacity(0.055)
-    }
-    var inkPrimary: Color {
-        isDark ? Color(red: 0.94, green: 0.93, blue: 0.91) : Color(red: 0.15, green: 0.145, blue: 0.135)
-    }
-    var labelColor: Color {
-        isDark ? Color.white.opacity(0.56) : Color(red: 0.44, green: 0.42, blue: 0.39)
-    }
-    var subtleLabelColor: Color {
-        isDark ? Color.white.opacity(0.40) : Color(red: 0.58, green: 0.55, blue: 0.51)
-    }
-    var brandGradient: LinearGradient {
-        LinearGradient(
-            colors: [
-                Color(red: 0.83, green: 0.44, blue: 0.30),
-                Color(red: 0.74, green: 0.35, blue: 0.22)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
+    var cardSurface: Color { palette.cardSurface }
+    var cardBorder: Color { palette.cardBorder }
+    var cardShadow: Color { palette.cardShadow }
+    var dividerColor: Color { palette.dividerColor }
+    var inkPrimary: Color { palette.inkPrimary }
+    var labelColor: Color { palette.labelColor }
+    var subtleLabelColor: Color { palette.subtleLabelColor }
 
     func purityColor(_ score: Int) -> Color {
         ShieldMetricsStyle.purityColor(score, safe: safeGreen, warn: warnAmber, danger: dangerRed)
@@ -130,7 +95,7 @@ struct ShieldDashboardView: View {
                 HStack(spacing: 11) {
                     ShieldStatusBadge(
                         isSafe: vm.snapshot.isSafe || state.setupReport != nil,
-                        accentColor: vm.snapshot.isSafe ? safeGreen : (state.isFirstRun ? brandTerracotta : dangerRed),
+                        accentColor: vm.snapshot.isSafe ? safeGreen : (state.isFirstRun ? titaniumAccent : dangerRed),
                         isDark: isDark,
                         isActive: vm.isDashboardVisible
                     )
@@ -144,10 +109,10 @@ struct ShieldDashboardView: View {
                         HStack(spacing: 5.5) {
                             Text(AppReleaseConfig.shortDisplayVersion)
                                 .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                                .foregroundColor(brandTerracotta)
+                                .foregroundColor(titaniumAccent)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 1.5)
-                                .background(Capsule().fill(brandTerracotta.opacity(isDark ? 0.18 : 0.10)))
+                                .background(Capsule().fill(titaniumAccent.opacity(isDark ? 0.18 : 0.10)))
                             Text("Console")
                                 .font(.system(size: 10.5, weight: .medium, design: .rounded))
                                 .foregroundColor(subtleLabelColor)
@@ -169,9 +134,13 @@ struct ShieldDashboardView: View {
 
                 Spacer(minLength: 10)
 
-                VStack(alignment: .leading, spacing: 0) {
-                    VStack(alignment: .leading, spacing: 6.5) {
-                        HStack(spacing: 6.5) {
+                VStack(alignment: .leading, spacing: 11) {
+                    Rectangle()
+                        .fill(dividerColor)
+                        .frame(height: 1)
+
+                    VStack(alignment: .leading, spacing: 4.5) {
+                        HStack(spacing: 6) {
                             PulsingOpacityView(
                                 isActive: vm.isDashboardVisible,
                                 duration: 2.2,
@@ -181,29 +150,34 @@ struct ShieldDashboardView: View {
                                 Circle()
                                     .fill(accentColor)
                             }
-                            .frame(width: 7.5, height: 7.5)
+                            .frame(width: 7, height: 7)
+
                             Text(vm.snapshot.isSafe ? "静谧守护中" : "防线需关注")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundColor(accentColor)
-                            Spacer()
+
+                            Spacer(minLength: 4)
+
                             Text("\(vm.snapshot.defenseScore)/8")
                                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
                                 .foregroundColor(subtleLabelColor)
                         }
 
-                        Text(vm.snapshot.expected_ip)
-                            .font(.system(size: 13, weight: .bold, design: .monospaced))
-                            .foregroundColor(inkPrimary.opacity(0.88))
-                            .lineLimit(1)
+                        HStack(spacing: 6) {
+                            Text(vm.snapshot.expected_ip)
+                                .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
+                                .foregroundColor(inkPrimary.opacity(0.84))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.85)
 
-                        Text("\(vm.snapshot.region_short) · 更新 \(vm.snapshot.checked_at)")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(subtleLabelColor)
-                            .lineLimit(1)
+                            Spacer(minLength: 4)
+
+                            Text(vm.snapshot.region_short)
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundColor(subtleLabelColor)
+                        }
                     }
-                    .padding(14)
-
-                    Divider().overlay(dividerColor).padding(.horizontal, 10)
+                    .padding(.horizontal, 4)
 
                     Button(action: onLaunchClaude) {
                         HStack(spacing: 6.5) {
@@ -214,6 +188,7 @@ struct ShieldDashboardView: View {
                             } else {
                                 Image(systemName: vm.snapshot.desktopRunning ? "macwindow.on.rectangle" : "play.fill")
                                     .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(accentColor)
                             }
                             Text(
                                 vm.isCheckingLaunch
@@ -221,39 +196,41 @@ struct ShieldDashboardView: View {
                                     : (vm.snapshot.desktopRunning ? "切回 Claude 桌面版" : "安全启动 Claude")
                             )
                             .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(inkPrimary)
                             .lineLimit(1)
                         }
                         .frame(maxWidth: .infinity)
-                        .frame(height: 38)
-                        .foregroundColor(brandTerracotta)
+                        .frame(height: 36)
                         .background(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .fill(
-                                    brandTerracotta.opacity(
-                                        launchHover.value
-                                            ? (isDark ? 0.22 : 0.14)
-                                            : (isDark ? 0.14 : 0.085)
-                                    )
+                                    launchHover.value
+                                        ? (isDark ? Color(red: 0.175, green: 0.190, blue: 0.215) : Color.white)
+                                        : cardSurface
                                 )
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(
+                                    launchHover.value
+                                        ? AnyShapeStyle(accentColor.opacity(isDark ? 0.36 : 0.28))
+                                        : AnyShapeStyle(palette.cardSpecularBorder),
+                                    lineWidth: 0.8
+                                )
+                        )
+                        .shadow(
+                            color: launchHover.value ? accentColor.opacity(isDark ? 0.14 : 0.09) : cardShadow,
+                            radius: launchHover.value ? 7 : 5,
+                            y: 1.5
                         )
                     }
                     .buttonStyle(SnappyButtonStyle(scale: 0.98))
-                    .animation(.easeOut(duration: 0.12), value: launchHover.value)
+                    .animation(.easeOut(duration: 0.14), value: launchHover.value)
                     .onHover { launchHover.value = $0 }
                     .disabled(vm.isCheckingLaunch)
-                    .padding(9)
                 }
-                .background(
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .fill(cardSurface.opacity(isDark ? 0.86 : 0.90))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .strokeBorder(cardBorder, lineWidth: 0.75)
-                )
-                .shadow(color: cardShadow, radius: 5, y: 1.5)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 20)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 18)
             }
         }
     }
@@ -267,12 +244,12 @@ struct ShieldDashboardView: View {
         }) {
             HStack(spacing: 10.5) {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(active ? brandTerracotta : Color.clear)
+                    .fill(active ? titaniumAccent : Color.clear)
                     .frame(width: 3, height: 22)
 
                 Image(systemName: section.icon)
                     .font(.system(size: 15, weight: active ? .semibold : .medium))
-                    .foregroundColor(active ? brandTerracotta : labelColor)
+                    .foregroundColor(active ? titaniumAccent : labelColor)
                     .frame(width: 22, alignment: .center)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -297,7 +274,7 @@ struct ShieldDashboardView: View {
                         .background(Capsule().fill(pc.opacity(isDark ? 0.18 : 0.10)))
                 } else if section == .settings, vm.availableUpdate != nil {
                     Circle()
-                        .fill(brandTerracotta)
+                        .fill(titaniumAccent)
                         .frame(width: 7, height: 7)
                 }
             }
@@ -312,9 +289,9 @@ struct ShieldDashboardView: View {
                             .fill(cardSurface)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(cardBorder, lineWidth: 0.7)
+                                    .strokeBorder(palette.cardSpecularBorder, lineWidth: 0.75)
                             )
-                            .shadow(color: cardShadow, radius: 5, y: 1.5)
+                            .shadow(color: cardShadow, radius: 6, y: 2)
                             .matchedGeometryEffect(id: "dashboardNavPill", in: navNamespace)
                     }
                 }
@@ -330,15 +307,8 @@ struct ShieldDashboardView: View {
             canvasBg.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                LinearGradient(
-                    colors: [
-                        (vm.snapshot.isSafe ? safeGreen : brandTerracotta).opacity(isDark ? 0.08 : 0.045),
-                        Color.clear
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: 140)
+                palette.topAtmosphereGlow(isSafe: vm.snapshot.isSafe)
+                    .frame(height: 160)
                 Spacer()
             }
             .allowsHitTesting(false)
@@ -413,7 +383,7 @@ struct ShieldDashboardView: View {
             Spacer(minLength: 12)
 
             HStack(spacing: 8) {
-                Button(action: { vm.refresh(force: true) }) {
+                Button(action: { vm.refresh(force: true, mode: .full, userInitiated: true) }) {
                     HStack(spacing: 5.5) {
                         if vm.isRefreshing {
                             ProgressView().controlSize(.mini).scaleEffect(0.76)
@@ -440,19 +410,19 @@ struct ShieldDashboardView: View {
                         Text("收至状态栏")
                             .font(.system(size: 12, weight: .medium))
                     }
-                    .foregroundColor(hideBarHover.value ? brandTerracotta : inkPrimary.opacity(0.82))
+                    .foregroundColor(hideBarHover.value ? titaniumAccent : inkPrimary.opacity(0.82))
                     .padding(.horizontal, 12.5)
                     .frame(height: 32)
                     .background(
                         Capsule().fill(
                             hideBarHover.value
-                                ? brandTerracotta.opacity(isDark ? 0.16 : 0.09)
+                                ? titaniumAccent.opacity(isDark ? 0.16 : 0.09)
                                 : cardSurface
                         )
                     )
                     .overlay(
                         Capsule().strokeBorder(
-                            hideBarHover.value ? brandTerracotta.opacity(0.32) : cardBorder,
+                            hideBarHover.value ? titaniumAccent.opacity(0.32) : cardBorder,
                             lineWidth: 0.75
                         )
                     )

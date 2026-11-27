@@ -20,7 +20,7 @@ Never bypass or weaken `scripts/check.sh` or `scripts/garden-guard.py`. When fix
 
 ## 3. UI Design Tokens & Lifecycle Contract
 
-- **Aesthetic**: Warm Anthropic Editorial (`#F7F5F0` / `#EFECE6` light, `#181717` / `#1E1D1C` dark; `#CC6945` / `#DB7A57` Soft Terracotta, `#1C8763` / `#42C794` Sage Emerald).
+- **Aesthetic**: Ivory Porcelain & Brushed Titanium (`#F5F6F2` / `#ECEEE9` light, `#141619` / `#191C20` dark; Machined Space Titanium / Luminous Ivory Titanium CTAs; `#119665` / `#38D59A` Apple Jade Emerald; centralized in `app/Sources/ShieldPalette.swift`).
 - **Console Grid**: Window `980 × 752` (min `820 × 580`), sidebar `232pt`, H1 (`y: 34..78`, height `44pt`), H2 (`y: 94`), unified `14pt` gutter / `18pt` rhythm, concentric radii (`16 / 13 / 12 / 10 / 9`).
 - **Lifecycle**: `--radar-only` starts `.accessory` (`<5ms` cached render); opening Console switches to `.regular` (Dock minimize/reopen); closing returns to `.accessory`.
 

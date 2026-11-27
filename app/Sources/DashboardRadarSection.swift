@@ -220,46 +220,15 @@ extension ShieldDashboardView {
                 }
             }
 
-            HStack(spacing: 14) {
+            if vm.snapshot.desktopRunning {
                 dashboardActionTile(
-                    icon: "sparkle.magnifyingglass",
-                    title: vm.isAuditing ? "全面体检中..." : "全面体检",
-                    isLoading: vm.isAuditing,
-                    tint: inkPrimary
-                ) {
-                    vm.runFullCheckup()
-                }
-
-                dashboardActionTile(
-                    icon: "camera.viewfinder",
-                    title: "截图诊断",
+                    icon: "stop.circle.fill",
+                    title: "急停 Claude 桌面版",
                     isLoading: false,
-                    tint: inkPrimary
+                    tint: dangerRed,
+                    isDestructive: true
                 ) {
-                    copyDashboardSnapshotImage()
-                }
-
-                dashboardActionTile(
-                    icon: "slider.horizontal.3",
-                    title: "防护设置",
-                    isLoading: false,
-                    tint: inkPrimary
-                ) {
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
-                        nav.selectedSection = .settings
-                    }
-                }
-
-                if vm.snapshot.desktopRunning {
-                    dashboardActionTile(
-                        icon: "stop.circle.fill",
-                        title: "急停 Claude",
-                        isLoading: false,
-                        tint: dangerRed,
-                        isDestructive: true
-                    ) {
-                        vm.emergencyKillClaude()
-                    }
+                    vm.emergencyKillClaude()
                 }
             }
         }
@@ -297,76 +266,9 @@ extension ShieldDashboardView {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(isDestructive ? dangerRed.opacity(0.28) : cardBorder, lineWidth: 0.75)
             )
-            .shadow(color: cardShadow, radius: 4, y: 1.5)
+            .shadow(color: cardShadow, radius: 5, y: 1.5)
         }
         .buttonStyle(SnappyButtonStyle(scale: 0.98))
-    }
-
-    private func copyDashboardSnapshotImage() {
-        let card = VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                ShieldStatusBadge(
-                    isSafe: vm.snapshot.isSafe,
-                    accentColor: accentColor,
-                    isDark: isDark,
-                    isActive: false
-                )
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(vm.snapshot.isSafe ? "SHIELD ARMED" : "IP 异常预警")
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                    Text("\(vm.snapshot.expected_ip) · \(vm.snapshot.region_short)")
-                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                        .foregroundColor(labelColor)
-                }
-                Spacer()
-                if let p = vm.purity {
-                    Text("\(p.purity_score) \(p.grade)")
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundColor(purityColor(p.purity_score))
-                }
-            }
-            HStack(spacing: 8) {
-                dashboardTunnelCard(
-                    title: "Claude 边缘 :\(vm.snapshot.proxy_port)",
-                    ip: vm.snapshot.proxy.ip,
-                    subtitle: vm.snapshot.claude_edge.colo.map { "CF \($0) · \(vm.snapshot.claude_edge.loc ?? "")" } ?? "-",
-                    latency: vm.snapshot.proxy.latency_ms,
-                    ok: vm.snapshot.proxyOK,
-                    icon: "arrow.triangle.branch"
-                )
-                dashboardTunnelCard(
-                    title: "TUN 默认路由",
-                    ip: vm.snapshot.tun.ip,
-                    subtitle: vm.snapshot.tun.colo.map { "CF \($0) · \(vm.snapshot.tun.loc ?? "")" } ?? "-",
-                    latency: vm.snapshot.tun.latency_ms,
-                    ok: vm.snapshot.tunOK,
-                    icon: "shield.lefthalf.filled"
-                )
-            }
-            HStack {
-                Text("Claude Shield \(AppReleaseConfig.shortDisplayVersion) · \(vm.snapshot.checked_at)")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(labelColor)
-                Spacer()
-                Text("防线 \(vm.snapshot.defenseScore)/8")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(safeGreen)
-            }
-        }
-        .padding(16)
-        .frame(width: 440)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(canvasBg))
-        .environment(\.colorScheme, isDark ? .dark : .light)
-
-        let renderer = ImageRenderer(content: card)
-        renderer.scale = 2.0
-        if let cgImage = renderer.cgImage {
-            let rep = NSBitmapImageRep(cgImage: cgImage)
-            let png = rep.representation(using: .png, properties: [:])
-            vm.copyDiagnosticScreenshot(png)
-            return
-        }
-        vm.copyDiagnosticScreenshot(nil)
     }
 
     private func dashboardTunnelCard(title: String, ip: String, subtitle: String, latency: Int?, ok: Bool, icon: String) -> some View {
@@ -408,9 +310,9 @@ extension ShieldDashboardView {
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(cardSurface))
-        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.75))
-        .shadow(color: cardShadow, radius: 6, y: 2)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(cardSurface))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(palette.cardSpecularBorder, lineWidth: 0.85))
+        .shadow(color: cardShadow, radius: 8, y: 2.5)
     }
 
     private func dashboardMetricTile(icon: String, title: String, value: String, ok: Bool, dim: Bool = false) -> some View {
@@ -440,8 +342,8 @@ extension ShieldDashboardView {
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(cardSurface))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.75))
-        .shadow(color: cardShadow, radius: 4, y: 1.5)
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(palette.cardSpecularBorder, lineWidth: 0.8))
+        .shadow(color: cardShadow, radius: 6, y: 2)
     }
 
     private func dashboardToggleCard(icon: String, title: String, subtitle: String, isOn: Bool, action: @escaping () -> Void) -> some View {
