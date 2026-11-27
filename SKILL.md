@@ -1,14 +1,14 @@
 ---
 name: claude-shield
 description: >-
-  macOS 原生轻量级 Claude Shield v3.5 防封安全套件（单进程内嵌 Rust FFI 核心 + SwiftUI 状态栏雷达 & Studio 控制台，零虚拟机损耗）全套配置指南与自动化部署工作流。
+  macOS 原生轻量级 Claude Shield v3.6 防封安全套件（单进程内嵌 Rust FFI 核心 + SwiftUI 状态栏雷达 & Studio 控制台，零虚拟机损耗）全套配置指南与自动化部署工作流。
   覆盖 AdsPower 指纹浏览器隔离、Clash Verge Rev (TUN + Fake-IP + 防 DNS/IPv6 泄露) 三点 IP 门禁锁、
   ip.net.coffee 级多源 IP 纯净度体检、Claude Code CLI 与 Claude Desktop 硬代理绑定、原版图标彻底隐藏防误触、
   开机自启雷达、每日安全巡检、睡眠唤醒瞬间急停、OAuth 强制拦截以及官方 macOS Seatbelt 沙盒。
   当用户需要配置 Claude Code / Claude 桌面版防封号、隔离多环境、检测 IP 纯净度或防止误裸连国内 IP 时激活。
 ---
 
-# Claude Shield v3.5 — macOS 原生轻量防封安全套件（单进程 Rust FFI + SwiftUI）
+# Claude Shield v3.6 — macOS 原生轻量防封安全套件（单进程 Rust FFI + SwiftUI）
 
 一套 **0 虚拟机内存损耗、Rust 极速内核、100% 原生速度** 的 macOS 防封隔离架构，同时守护 **网页端（AdsPower）+ 终端（Claude Code）+ 桌面端（Claude Desktop）** 三端闭环，内置 **`ip.net.coffee/claude` 级多源 IP 纯净度引擎**、**独立 Studio 控制台**、**开机自启雷达** 与 **每日安全巡检**。
 
