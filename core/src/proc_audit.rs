@@ -228,10 +228,11 @@ mod macos {
         std::str::from_utf8(slice).ok()
     }
 
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
-    thread_local! {
-        static PROCARGS_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    fn shared_procargs_scratch() -> &'static Mutex<Vec<u8>> {
+        static PROCARGS_SCRATCH: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+        PROCARGS_SCRATCH.get_or_init(|| Mutex::new(Vec::new()))
     }
 
     pub(super) fn read_raw_procargs2(pid: i32, raw_buf: &mut Vec<u8>) -> Option<usize> {
@@ -271,79 +272,82 @@ mod macos {
         let pids = list_all_pids();
         let mut path_buf = [0u8; PROC_PIDPATHINFO_MAXSIZE];
 
-        PROCARGS_SCRATCH.with(|cell| {
-            let mut raw_args_buf = cell.borrow_mut();
-            for pid in pids {
-                if pid <= 0 || pid == self_pid {
-                    continue;
-                }
-                let Some(exec_path) = read_pid_path(pid, &mut path_buf) else {
-                    continue;
-                };
+        let mut fallback_buf = Vec::new();
+        let mut guard = shared_procargs_scratch().lock().ok();
+        let raw_args_buf: &mut Vec<u8> = match guard.as_deref_mut() {
+            Some(buf) => buf,
+            None => &mut fallback_buf,
+        };
+        for pid in pids {
+            if pid <= 0 || pid == self_pid {
+                continue;
+            }
+            let Some(exec_path) = read_pid_path(pid, &mut path_buf) else {
+                continue;
+            };
 
-                if is_claude_desktop_exec(exec_path) {
-                    let pid_str = pid.to_string();
-                    out.desktop_pids.push(pid_str.clone());
-                    let (proxy_ok, bypass_ok, quic_ok, webrtc_ok) =
-                        if let Some(len) = read_raw_procargs2(pid, &mut raw_args_buf) {
-                            if let Some((args, _)) = parse_procargs2(&raw_args_buf[..len]) {
-                                (
-                                    args.iter().any(|a| a == &expected_flag),
-                                    args.iter().any(|a| a == "--proxy-bypass-list=<-loopback>"),
-                                    args.iter().any(|a| a == "--disable-quic"),
-                                    args.iter().any(|a| {
-                                        a == "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
-                                    }),
-                                )
-                            } else {
-                                (false, false, false, false)
-                            }
+            if is_claude_desktop_exec(exec_path) {
+                let pid_str = pid.to_string();
+                out.desktop_pids.push(pid_str.clone());
+                let (proxy_ok, bypass_ok, quic_ok, webrtc_ok) =
+                    if let Some(len) = read_raw_procargs2(pid, raw_args_buf) {
+                        if let Some((args, _)) = parse_procargs2(&raw_args_buf[..len]) {
+                            (
+                                args.iter().any(|a| a == &expected_flag),
+                                args.iter().any(|a| a == "--proxy-bypass-list=<-loopback>"),
+                                args.iter().any(|a| a == "--disable-quic"),
+                                args.iter().any(|a| {
+                                    a == "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+                                }),
+                            )
                         } else {
                             (false, false, false, false)
-                        };
+                        }
+                    } else {
+                        (false, false, false, false)
+                    };
 
-                    let this_unprotected = !(proxy_ok && bypass_ok && quic_ok && webrtc_ok);
-                    if out.desktop_pid.is_none() || this_unprotected {
-                        out.desktop_pid = Some(pid_str);
-                    }
-                    out.desktop_proxy_bound &= proxy_ok;
-                    out.desktop_bypass_locked &= bypass_ok;
-                    out.desktop_quic_disabled &= quic_ok;
-                    out.desktop_webrtc_locked &= webrtc_ok;
-                    continue;
+                let this_unprotected = !(proxy_ok && bypass_ok && quic_ok && webrtc_ok);
+                if out.desktop_pid.is_none() || this_unprotected {
+                    out.desktop_pid = Some(pid_str);
                 }
-
-                if !is_candidate_cli_comm(exec_path) {
-                    continue;
-                }
-
-                let Some(len) = read_raw_procargs2(pid, &mut raw_args_buf) else {
-                    continue;
-                };
-                let slice = &raw_args_buf[..len];
-
-                // Fast zero-allocation pre-filter for generic `node`/`bun` processes
-                let base = exec_path.rsplit('/').next().unwrap_or(exec_path);
-                if matches!(base, "node" | "bun")
-                    && !raw_procargs_contains_ascii(slice, b"claude-code")
-                {
-                    continue;
-                }
-
-                let Some((args, envp)) = parse_procargs2(slice) else {
-                    continue;
-                };
-                let args_joined = args.join(" ");
-                if !is_genuine_claude_cli_args(exec_path, &args_joined) {
-                    continue;
-                }
-                let pid_str = pid.to_string();
-                out.active_cli_pids.push(pid_str.clone());
-                if !has_expected_proxy_env_entries(&envp, proxy_port) {
-                    out.unprotected_cli_pids.push(pid_str);
-                }
+                out.desktop_proxy_bound &= proxy_ok;
+                out.desktop_bypass_locked &= bypass_ok;
+                out.desktop_quic_disabled &= quic_ok;
+                out.desktop_webrtc_locked &= webrtc_ok;
+                continue;
             }
-        });
+
+            if !is_candidate_cli_comm(exec_path) {
+                continue;
+            }
+
+            let Some(len) = read_raw_procargs2(pid, raw_args_buf) else {
+                continue;
+            };
+            let slice = &raw_args_buf[..len];
+
+            // Fast zero-allocation pre-filter for generic `node`/`bun` processes
+            let base = exec_path.rsplit('/').next().unwrap_or(exec_path);
+            if matches!(base, "node" | "bun")
+                && !raw_procargs_contains_ascii(slice, b"claude-code")
+            {
+                continue;
+            }
+
+            let Some((args, envp)) = parse_procargs2(slice) else {
+                continue;
+            };
+            let args_joined = args.join(" ");
+            if !is_genuine_claude_cli_args(exec_path, &args_joined) {
+                continue;
+            }
+            let pid_str = pid.to_string();
+            out.active_cli_pids.push(pid_str.clone());
+            if !has_expected_proxy_env_entries(&envp, proxy_port) {
+                out.unprotected_cli_pids.push(pid_str);
+            }
+        }
 
         out
     }

@@ -91,10 +91,10 @@ extension ShieldDashboardView {
                 .shadow(color: cardShadow, radius: 6, y: 2)
 
                 LazyVGrid(columns: fourCols, spacing: 12) {
-                    dashboardLeakCard(title: "Claude 边缘", value: p.claude_edge_match ? (p.claude_colo ?? "一致") : "异常", ok: p.claude_edge_match)
-                    dashboardLeakCard(title: "DNS 通道", value: p.dns_leak ? "检测到泄露!" : "零泄露", ok: !p.dns_leak)
-                    dashboardLeakCard(title: "IPv6 隔离", value: p.ipv6_leak ? "检测到泄露!" : "已封闭", ok: !p.ipv6_leak)
-                    dashboardLeakCard(title: "时区对齐", value: p.timezone_aligned ? "完全对齐" : "存在偏移!", ok: p.timezone_aligned)
+                    dashboardLeakCard(title: "Claude 边缘", value: p.claude_edge_match ? (p.claude_colo ?? "一致") : "异常", tone: p.claude_edge_match ? .safe : .danger)
+                    dashboardLeakCard(title: "DNS 通道", value: p.dnsStatus.dashboardLabel, tone: p.dnsStatus.tone)
+                    dashboardLeakCard(title: "IPv6 隔离", value: p.ipv6_leak ? "检测到泄露!" : "已封闭", tone: p.ipv6_leak ? .danger : .safe)
+                    dashboardLeakCard(title: "时区对齐", value: p.timezone_aligned ? "完全对齐" : "存在偏移!", tone: p.timezone_aligned ? .safe : .warn)
                 }
 
                 VStack(alignment: .leading, spacing: 9) {
@@ -127,6 +127,7 @@ extension ShieldDashboardView {
                                     .foregroundColor(labelColor)
                                     .lineLimit(1)
                                     .truncationMode(.tail)
+                                    .help(f.detail)
 
                                 Spacer(minLength: 8)
 
@@ -173,15 +174,27 @@ extension ShieldDashboardView {
         }
     }
 
-    private func dashboardLeakCard(title: String, value: String, ok: Bool) -> some View {
-        let color = ok ? safeGreen : dangerRed
+    private func dashboardLeakCard(title: String, value: String, tone: LeakTileTone) -> some View {
+        let color: Color
+        let iconName: String
+        switch tone {
+        case .safe:
+            color = safeGreen
+            iconName = "checkmark.circle.fill"
+        case .warn:
+            color = warnAmber
+            iconName = "exclamationmark.triangle.fill"
+        case .danger:
+            color = dangerRed
+            iconName = "xmark.octagon.fill"
+        }
         return VStack(alignment: .leading, spacing: 5) {
             HStack {
                 Text(title)
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundColor(labelColor)
                 Spacer()
-                Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                Image(systemName: iconName)
                     .font(.system(size: 11.5))
                     .foregroundColor(color)
             }

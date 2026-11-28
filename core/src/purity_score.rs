@@ -42,6 +42,13 @@ pub fn is_region_supported(country_code: &str) -> bool {
     !upper.is_empty() && upper != "??" && !BLOCKED_CLAUDE_REGIONS.contains(&upper.as_str())
 }
 
+pub(crate) fn is_dns_verified(dns_proxy: &DnsProbeInfo, dns_tun: &DnsProbeInfo) -> bool {
+    dns_proxy.geo.is_some()
+        || dns_tun.geo.is_some()
+        || dns_proxy.ip.is_some()
+        || dns_tun.ip.is_some()
+}
+
 pub(crate) fn normalize_timezone(tz: &str) -> &str {
     match tz.trim() {
         "US/Pacific" => "America/Los_Angeles",
@@ -49,6 +56,10 @@ pub(crate) fn normalize_timezone(tz: &str) -> &str {
         "US/Central" => "America/Chicago",
         "US/Mountain" => "America/Denver",
         "Asia/Calcutta" => "Asia/Kolkata",
+        "Asia/Saigon" => "Asia/Ho_Chi_Minh",
+        "Asia/Chongqing" | "Asia/Harbin" | "Asia/Urumqi" => "Asia/Shanghai",
+        "America/Montreal" => "America/Toronto",
+        "Europe/Kiev" => "Europe/Kyiv",
         "Etc/UTC" | "Etc/GMT" => "UTC",
         other => other,
     }
@@ -133,10 +144,7 @@ pub(crate) fn evaluate_purity_score(s: &PuritySignals<'_>) -> (u8, String, Strin
         });
     }
 
-    let dns_verified = s.dns_proxy.geo.is_some()
-        || s.dns_tun.geo.is_some()
-        || s.dns_proxy.ip.is_some()
-        || s.dns_tun.ip.is_some();
+    let dns_verified = is_dns_verified(s.dns_proxy, s.dns_tun);
 
     if s.dns_leak {
         score -= 35;

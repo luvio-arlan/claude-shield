@@ -292,43 +292,46 @@ extension ShieldPopoverView {
                 .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(pc.opacity(0.32), lineWidth: 0.9))
 
                 HStack(spacing: 6) {
-                    leakPill(title: "Claude边", value: p.claude_edge_match ? (p.claude_colo ?? "一致") : "异常", ok: p.claude_edge_match)
-                    leakPill(title: "DNS", value: p.dns_leak ? "泄露!" : "零泄露", ok: !p.dns_leak)
-                    leakPill(title: "IPv6", value: p.ipv6_leak ? "泄露!" : "已封闭", ok: !p.ipv6_leak)
-                    leakPill(title: "时区", value: p.timezone_aligned ? "已对齐" : "偏移!", ok: p.timezone_aligned)
+                    leakPill(title: "Claude边", value: p.claude_edge_match ? (p.claude_colo ?? "一致") : "异常", tone: p.claude_edge_match ? .safe : .danger)
+                    leakPill(title: "DNS", value: p.dnsStatus.compactLabel, tone: p.dnsStatus.tone)
+                    leakPill(title: "IPv6", value: p.ipv6_leak ? "泄露!" : "已封闭", tone: p.ipv6_leak ? .danger : .safe)
+                    leakPill(title: "时区", value: p.timezone_aligned ? "已对齐" : "偏移!", tone: p.timezone_aligned ? .safe : .warn)
                 }
 
-                VStack(spacing: 4.5) {
-                    ForEach(p.factors.prefix(6)) { f in
-                        HStack(alignment: .top, spacing: 7) {
-                            Image(systemName: f.severity == "good" ? "checkmark.circle.fill" : (f.severity == "warn" ? "exclamationmark.triangle.fill" : "xmark.octagon.fill"))
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(f.severity == "good" ? safeGreen : (f.severity == "warn" ? warnAmber : dangerRed))
-                                .padding(.top, 1)
-                            VStack(alignment: .leading, spacing: 1) {
-                                HStack {
-                                    Text(f.title)
-                                        .font(.system(size: 10.5, weight: .semibold))
-                                        .foregroundColor(.primary)
-                                    Spacer()
-                                    if f.penalty < 0 {
-                                        Text("\(f.penalty)")
-                                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                                            .foregroundColor(f.severity == "warn" ? warnAmber : dangerRed)
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 4.5) {
+                        ForEach(p.factors) { f in
+                            HStack(alignment: .top, spacing: 7) {
+                                Image(systemName: f.severity == "good" ? "checkmark.circle.fill" : (f.severity == "warn" ? "exclamationmark.triangle.fill" : "xmark.octagon.fill"))
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(f.severity == "good" ? safeGreen : (f.severity == "warn" ? warnAmber : dangerRed))
+                                    .padding(.top, 1)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    HStack {
+                                        Text(f.title)
+                                            .font(.system(size: 10.5, weight: .semibold))
+                                            .foregroundColor(.primary)
+                                        Spacer()
+                                        if f.penalty < 0 {
+                                            Text("\(f.penalty)")
+                                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                                .foregroundColor(f.severity == "warn" ? warnAmber : dangerRed)
+                                        }
                                     }
+                                    Text(f.detail)
+                                        .font(.system(size: 9.5, weight: .medium))
+                                        .foregroundColor(labelColor)
+                                        .lineLimit(2)
                                 }
-                                Text(f.detail)
-                                    .font(.system(size: 9.5, weight: .medium))
-                                    .foregroundColor(labelColor)
-                                    .lineLimit(2)
                             }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(cardSurface))
+                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.6))
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(cardSurface))
-                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(cardBorder, lineWidth: 0.6))
                     }
                 }
+                .frame(maxHeight: 265)
             } else {
                 VStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -366,8 +369,13 @@ extension ShieldPopoverView {
         }
     }
 
-    private func leakPill(title: String, value: String, ok: Bool) -> some View {
-        let color = ok ? safeGreen : dangerRed
+    private func leakPill(title: String, value: String, tone: LeakTileTone) -> some View {
+        let color: Color
+        switch tone {
+        case .safe: color = safeGreen
+        case .warn: color = warnAmber
+        case .danger: color = dangerRed
+        }
         return VStack(spacing: 2) {
             Text(title)
                 .font(.system(size: 9.5, weight: .medium))

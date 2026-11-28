@@ -66,7 +66,10 @@ final class ShieldViewModel: ObservableObject {
     private var isScreenOff: Bool = false
     private var isLowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
     private var isAuditingDefenses: Bool = false
+    private var isHidingOriginalApp: Bool = false
     private var isProbeInFlight: Bool = false
+    private var pathDebounceTask: Task<Void, Never>?
+    private var toastDismissTask: Task<Void, Never>?
     private var pendingRefresh: (mode: TelemetryProbeMode, resetPool: Bool, userInitiated: Bool)?
 
     var isUIVisible: Bool { isPopoverVisible || isDashboardVisible }
@@ -84,6 +87,8 @@ final class ShieldViewModel: ObservableObject {
         timer?.invalidate()
         purityTimer?.invalidate()
         updateTimer?.invalidate()
+        pathDebounceTask?.cancel()
+        toastDismissTask?.cancel()
         pathMonitor?.cancel()
         mihomoMonitor.stop()
         for w in vnodeWatchers { w.stop() }
@@ -324,8 +329,10 @@ final class ShieldViewModel: ObservableObject {
                 let changed = self.lastPathSignature != nil && self.lastPathSignature != sig
                 self.lastPathSignature = sig
                 if changed && !self.isSystemAsleep {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                        guard let self = self, !self.isSystemAsleep else { return }
+                    self.pathDebounceTask?.cancel()
+                    self.pathDebounceTask = Task { @MainActor [weak self] in
+                        try? await Task.sleep(nanoseconds: 800_000_000)
+                        guard !Task.isCancelled, let self = self, !self.isSystemAsleep else { return }
                         let mode: TelemetryProbeMode = self.isUIVisible ? .full : .light
                         self.refresh(force: true, mode: mode, resetPool: true)
                     }
@@ -418,9 +425,7 @@ final class ShieldViewModel: ObservableObject {
                 self.rescheduleTimer()
 
                 if defenses.original_app_exposed && defenses.hideOriginalPreference {
-                    Task.detached(priority: .utility) {
-                        _ = RustCoreBridge.hideOriginalApp()
-                    }
+                    self.triggerAutoHideOriginalAppIfNeeded()
                 }
 
                 if self.autoKillOnBreach {
@@ -509,9 +514,7 @@ final class ShieldViewModel: ObservableObject {
         self.rescheduleTimer()
 
         if result.defenses.original_app_exposed && result.defenses.hideOriginalPreference {
-            Task.detached(priority: .utility) {
-                _ = RustCoreBridge.hideOriginalApp()
-            }
+            triggerAutoHideOriginalAppIfNeeded()
         }
 
         if result.isSafe {
@@ -590,8 +593,12 @@ final class ShieldViewModel: ObservableObject {
             await MainActor.run {
                 self.isAuditing = false
                 if let report = report {
+                    let updatedSnap = self.snapshot.replacingDefenses(report.defenses)
+                    self.snapshot = updatedSnap
+                    self.loginAutoStart = report.defenses.login_item_enabled
                     self.purity = report.purity
-                    self.onStatusChange?(self.snapshot, report.purity)
+                    self.onStatusChange?(updatedSnap, report.purity)
+                    self.rescheduleTimer()
                     self.refresh(force: true)
                     if !silent {
                         if report.passed {
@@ -611,14 +618,28 @@ final class ShieldViewModel: ObservableObject {
         }
     }
 
+    private func triggerAutoHideOriginalAppIfNeeded() {
+        guard !isHidingOriginalApp else { return }
+        isHidingOriginalApp = true
+        Task.detached(priority: .utility) {
+            _ = RustCoreBridge.hideOriginalApp()
+            await MainActor.run {
+                self.isHidingOriginalApp = false
+            }
+        }
+    }
+
     func showToast(_ msg: String) {
+        toastDismissTask?.cancel()
         withAnimation(.easeInOut(duration: 0.2)) {
             toastMessage = msg
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+        toastDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled, let self = self else { return }
             withAnimation(.easeInOut(duration: 0.2)) {
-                if self?.toastMessage == msg {
-                    self?.toastMessage = nil
+                if self.toastMessage == msg {
+                    self.toastMessage = nil
                 }
             }
         }

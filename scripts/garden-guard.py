@@ -164,6 +164,35 @@ def check_swift_guardrails(errors: list[str]) -> None:
                     "Track screen lock/dim via `isScreenOff` and reserve `isSystemAsleep` strictly for `willSleepNotification` so background Claude sessions stay guarded while the display is off.",
                 )
             )
+        if "pathDebounceTask?.cancel()" not in vm_text:
+            errors.append(
+                fail(
+                    "DEBOUNCED_PATH_MONITOR_REFRESH",
+                    "NWPathMonitor updates in ShieldViewModel.swift are not debounced via a cancellable `pathDebounceTask`.",
+                    "Cancel and reschedule `pathDebounceTask` on pathUpdateHandler changes so Wi-Fi/TUN flaps never trigger redundant pool resets.",
+                )
+            )
+
+    for ui_name in ("DashboardPuritySection.swift", "PopoverSections.swift"):
+        ui_path = APP_SOURCES_DIR / ui_name
+        if ui_path.exists():
+            ui_text = ui_path.read_text(encoding="utf-8")
+            if re.search(r"dns_leak\s*\?[^:\n]+:\s*\"零泄露\"", ui_text) or "p.dnsStatus" not in ui_text:
+                errors.append(
+                    fail(
+                        "NO_BINARY_DNS_LEAK_UI",
+                        f"app/Sources/{ui_name} uses a binary dns_leak check instead of 3-state `p.dnsStatus`.",
+                        "Render DNS status via `p.dnsStatus` (`.clean` / `.unverified` / `.leaked`) so an incomplete EDNS probe never shows green \"零泄露\".",
+                    )
+                )
+            if ui_name == "PopoverSections.swift" and "p.factors.prefix(" in ui_text:
+                errors.append(
+                    fail(
+                        "NO_TRUNCATED_PURITY_FACTORS",
+                        "app/Sources/PopoverSections.swift hard-truncates audit factors via `p.factors.prefix(...)`.",
+                        "Render all `p.factors` inside a bounded `ScrollView` so warnings at index 6+ (e.g. timezone/WARP) are never silently hidden.",
+                    )
+                )
 
     required_patterns = [
         ("NSPopoverDelegate", "POPOVER_ANTI_FLICKER", "AppDelegate must conform to NSPopoverDelegate and track lastPopoverClosedAt."),
@@ -232,6 +261,28 @@ def check_rust_guardrails(errors: list[str]) -> None:
                     "NO_PRE_GATE_API_WARMUP",
                     "core/src/probe_pool.rs calls `warmup_anthropic_api` before verifying `is_safe_to_probe_anthropic_api` in `run_telemetry_cycle`.",
                     "Never connect to api.anthropic.com until Phase 1 verifies whitelisted Proxy + TUN exit IP and compliant region.",
+                )
+            )
+    purity_rs = ROOT / "core" / "src" / "purity.rs"
+    if purity_rs.exists():
+        purity_text = purity_rs.read_text(encoding="utf-8")
+        if re.search(r"http://\{[a-zA-Z0-9_]+:016x\}\.edns\.ip-api\.com", purity_text):
+            errors.append(
+                fail(
+                    "EDNS_NONCE_MUST_BE_32_CHARS",
+                    "core/src/purity.rs formats a 16-char `:016x` subdomain for `edns.ip-api.com` (which always returns HTTP 404).",
+                    "Generate a 32-char lowercase hex nonce (`http://{hi:016x}{lo:016x}.edns.ip-api.com/json`) so EDNS resolves in 1 hop.",
+                )
+            )
+    proc_audit_rs = ROOT / "core" / "src" / "proc_audit.rs"
+    if proc_audit_rs.exists():
+        proc_text = proc_audit_rs.read_text(encoding="utf-8")
+        if "thread_local!" in proc_text and "PROCARGS_SCRATCH" in proc_text:
+            errors.append(
+                fail(
+                    "NO_PER_THREAD_PROCARGS_SCRATCH",
+                    "core/src/proc_audit.rs stores large PROCARGS_SCRATCH buffers in `thread_local!`.",
+                    "Share a single `OnceLock<Mutex<Vec<u8>>>` scratch buffer so arbitrary Swift GCD threads do not pin N×512KB dirty pages.",
                 )
             )
     for path in rust_files():

@@ -225,6 +225,53 @@ struct PurityReport: Codable, Sendable {
     let factors: [RiskFactorModel]
 }
 
+enum LeakTileTone: Equatable, Sendable {
+    case safe
+    case warn
+    case danger
+}
+
+enum DnsAuditStatus: Equatable, Sendable {
+    case clean
+    case unverified
+    case leaked
+
+    var tone: LeakTileTone {
+        switch self {
+        case .clean: return .safe
+        case .unverified: return .warn
+        case .leaked: return .danger
+        }
+    }
+
+    var dashboardLabel: String {
+        switch self {
+        case .clean: return "零泄露"
+        case .unverified: return "待复测"
+        case .leaked: return "检测到泄露!"
+        }
+    }
+
+    var compactLabel: String {
+        switch self {
+        case .clean: return "零泄露"
+        case .unverified: return "待复测"
+        case .leaked: return "泄露!"
+        }
+    }
+}
+
+extension PurityReport {
+    var dnsVerified: Bool {
+        dns_proxy.geo != nil || dns_tun.geo != nil || dns_proxy.ip != nil || dns_tun.ip != nil
+    }
+
+    var dnsStatus: DnsAuditStatus {
+        if dns_leak { return .leaked }
+        return dnsVerified ? .clean : .unverified
+    }
+}
+
 struct PatrolReportModel: Codable, Sendable {
     let timestamp: String
     let passed: Bool

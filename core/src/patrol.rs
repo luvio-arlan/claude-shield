@@ -83,7 +83,6 @@ pub async fn run_daily_patrol(cfg: &ShieldConfig, notify: bool, auto_kill: bool)
             || !defenses.desktop_quic_disabled
             || !defenses.desktop_webrtc_locked);
     let mut desktop_killed = false;
-    let mut all_cli_killed = false;
 
     if desktop_unprotected {
         alerts.push("发现未绑定硬代理或未封闭 Bypass/QUIC/WebRTC 的 Claude 桌面版进程！".to_string());
@@ -115,9 +114,8 @@ pub async fn run_daily_patrol(cfg: &ShieldConfig, notify: bool, auto_kill: bool)
             kill_claude_desktop();
             auto_healed.push("巡检发现出口/防泄露高危异常，已自动急停 Claude 桌面版防裸连".to_string());
         }
-        if !defenses.active_cli_pids.is_empty() && !all_cli_killed {
+        if !defenses.active_cli_pids.is_empty() {
             let killed = kill_pids(&defenses.active_cli_pids);
-            all_cli_killed = true;
             if killed > 0 {
                 auto_healed.push(format!(
                     "巡检发现出口/防泄露高危异常，已自动终止 {} 个运行中的 Claude Code 进程",
@@ -127,7 +125,6 @@ pub async fn run_daily_patrol(cfg: &ShieldConfig, notify: bool, auto_kill: bool)
         }
     }
 
-    let _ = all_cli_killed;
     let passed = alerts.is_empty();
 
     let report = PatrolReport {

@@ -262,7 +262,7 @@ final class ShieldDashboardWindowController: NSObject, NSWindowDelegate {
                 viewModel.confirmAndUninstall()
             },
             onApplied: {
-                viewModel.refresh(force: true)
+                viewModel.refresh(force: true, mode: .full, resetPool: true)
                 viewModel.refreshPurity(silent: true)
             }
         )

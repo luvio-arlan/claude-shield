@@ -288,9 +288,16 @@ async fn cmd_purity(cfg: &ShieldConfig, json_mode: bool) {
         report.claude_tls.as_deref().unwrap_or("-"),
         report.claude_warp.as_deref().unwrap_or("-")
     );
+    let dns_status_str = if report.dns_leak {
+        "\x1b[31m存在泄露!\x1b[0m"
+    } else if !report.dns_verified() {
+        "\x1b[33m检测未完成(待复测)\x1b[0m"
+    } else {
+        "\x1b[32m安全\x1b[0m"
+    };
     println!(
         "DNS 检测: {}  |  IPv6 泄露: {}  |  时区对齐: {}",
-        if report.dns_leak { "\x1b[31m存在泄露!\x1b[0m" } else { "\x1b[32m安全\x1b[0m" },
+        dns_status_str,
         if report.ipv6_leak { "\x1b[31m存在泄露!\x1b[0m" } else { "\x1b[32m安全\x1b[0m" },
         if report.timezone_aligned { "\x1b[32m已对齐\x1b[0m" } else { "\x1b[33m不一致\x1b[0m" }
     );

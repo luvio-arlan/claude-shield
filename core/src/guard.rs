@@ -378,13 +378,8 @@ pub fn kill_pids(pids: &[String]) -> usize {
 pub fn kill_claude_desktop() -> usize {
     let procs = inspect_claude_processes(0);
     let mut killed = kill_pids(&procs.desktop_pids);
-    if killed == 0 {
-        // Fallback pkill in case a helper/spawned Claude process appeared between scans
-        let _ = Command::new("/usr/bin/pkill").args(["-9", "-x", "Claude"]).status();
-    } else {
-        // Also ensure any Electron helper/renderer child doesn't linger
-        let _ = Command::new("/usr/bin/pkill").args(["-9", "-x", "Claude"]).status();
-    }
+    // Ensure any Electron helper/renderer child spawned between scans doesn't linger
+    let _ = Command::new("/usr/bin/pkill").args(["-9", "-x", "Claude"]).status();
     if killed == 0 && !procs.desktop_pids.is_empty() {
         killed = procs.desktop_pids.len();
     }

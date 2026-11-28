@@ -69,7 +69,7 @@
 ### 1. 下载安装
 
 前往 **[GitHub Releases 最新版本](https://github.com/luvio-arlan/claude-shield/releases/latest)** 下载：
-- **`Claude-Shield-v3.7.0-macOS-arm64.dmg`**（推荐，双击打开后拖入 `Applications` 文件夹即可）
+- **`Claude-Shield-v3.7.1-macOS-arm64.dmg`**（推荐，双击打开后拖入 `Applications` 文件夹即可）
 
 > **首次打开提示**：由于开源版本采用 Ad-hoc 本地签名（未购买 Apple 付费公证证书），首次打开若遇到 macOS 安全提示，请在终端执行一次即可永久放行：
 > ```bash
@@ -161,7 +161,7 @@ git clone https://github.com/luvio-arlan/claude-shield.git
 cd claude-shield
 
 # 打包独立的 macOS .app / .dmg / .zip（输出至 dist/）
-bash scripts/build-release.sh 3.7.0
+bash scripts/build-release.sh 3.7.1
 
 # 或直接通过命令行安装到本机
 bash scripts/install.sh \

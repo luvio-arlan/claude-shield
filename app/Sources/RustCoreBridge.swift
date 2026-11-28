@@ -145,7 +145,7 @@ enum RustCoreBridge {
             return items
         }
         guard let data = runCore(["hide-original", "--json"]),
-              let items = try? JSONDecoder().decode([String].self, from: data) else {
+              let items = try? decoder.decode([String].self, from: data) else {
             return []
         }
         return items
@@ -167,7 +167,7 @@ enum RustCoreBridge {
             args.append(contentsOf: ["--port", String(port)])
         }
         guard let data = runCore(args) else { return nil }
-        return try? JSONDecoder().decode(DetectResultModel.self, from: data)
+        return try? decoder.decode(DetectResultModel.self, from: data)
     }
 
     static func runSetup(
@@ -190,12 +190,12 @@ enum RustCoreBridge {
         if !autostart { args.append("--no-autostart") }
         if !patrol { args.append("--no-patrol") }
         guard let data = runCore(args) else { return nil }
-        return try? JSONDecoder().decode(SetupReportModel.self, from: data)
+        return try? decoder.decode(SetupReportModel.self, from: data)
     }
 
     static func runUninstall() -> UninstallReportModel? {
         guard let data = runCore(["uninstall", "--json"]) else { return nil }
-        return try? JSONDecoder().decode(UninstallReportModel.self, from: data)
+        return try? decoder.decode(UninstallReportModel.self, from: data)
     }
 
     private static func xmlEscape(_ raw: String) -> String {

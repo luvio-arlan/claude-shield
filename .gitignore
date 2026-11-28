@@ -3,7 +3,12 @@ core/target/
 **/target/
 dist/
 
+# Local workspace & promo media
+.claude/
+promo/
+
 # macOS clutter
 .DS_Store
+**/.DS_Store
 *.swp
 *.swo

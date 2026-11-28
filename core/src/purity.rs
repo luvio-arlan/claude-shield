@@ -4,7 +4,8 @@ use crate::probe::{
     parse_cf_trace, probe_trace_channel,
 };
 use crate::purity_score::{
-    evaluate_purity_score, is_dns_leaked, is_region_supported, timezones_match, PuritySignals,
+    evaluate_purity_score, is_dns_leaked, is_dns_verified, is_region_supported, timezones_match,
+    PuritySignals,
 };
 use chrono::Local;
 use reqwest::Client;
@@ -72,6 +73,12 @@ pub struct PurityReport {
     pub factors: Vec<RiskFactor>,
 }
 
+impl PurityReport {
+    pub fn dns_verified(&self) -> bool {
+        is_dns_verified(&self.dns_proxy, &self.dns_tun)
+    }
+}
+
 async fn fetch_json(client: &Client, url: &str) -> Option<Value> {
     let mut req = client.get(url);
     if url.contains("ipinfo.io") {
@@ -84,27 +91,66 @@ async fn fetch_json(client: &Client, url: &str) -> Option<Value> {
     resp.json::<Value>().await.ok()
 }
 
-fn fresh_edns_url() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let seq = EDNS_NONCE_SEQ.fetch_add(1, Ordering::Relaxed);
-    let mixed = nanos.wrapping_mul(6364136223846793005) ^ seq.wrapping_add(0x9e3779b97f4a7c15);
-    format!("http://{mixed:016x}.edns.ip-api.com/json")
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e3779b97f4a7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+    x ^ (x >> 31)
 }
 
-async fn probe_edns(client: &Client) -> DnsProbeInfo {
-    let random_url = fresh_edns_url();
-    let val = match fetch_json(client, &random_url).await {
-        Some(v) => Some(v),
-        None => fetch_json(client, "http://edns.ip-api.com/json").await,
-    };
-    if let Some(v) = val {
-        let ip = v.pointer("/dns/ip").and_then(|x| x.as_str()).map(String::from);
-        let geo = v.pointer("/dns/geo").and_then(|x| x.as_str()).map(String::from);
-        let leaked = geo.as_deref().map(is_dns_leaked).unwrap_or(false);
-        return DnsProbeInfo { ip, geo, leaked };
+/// `edns.ip-api.com` strictly requires a 32-character `[a-z0-9]{32}` subdomain; shorter labels
+/// return HTTP 404. Emit two independent 64-bit SplitMix64 halves (`32` lowercase hex chars)
+/// so every probe resolves in a single HTTP hop with zero 404/302 overhead.
+pub(crate) fn fresh_edns_url() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = EDNS_NONCE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = u64::from(std::process::id());
+    let hi = splitmix64((nanos as u64) ^ seq.wrapping_mul(0x9e3779b97f4a7c15));
+    let lo = splitmix64(((nanos >> 64) as u64) ^ pid.rotate_left(17) ^ hi.wrapping_add(seq));
+    format!("http://{hi:016x}{lo:016x}.edns.ip-api.com/json")
+}
+
+pub(crate) fn parse_edns_response(v: &Value) -> Option<DnsProbeInfo> {
+    let ip = v
+        .pointer("/dns/ip")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let geo = v
+        .pointer("/dns/geo")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if ip.is_none() && geo.is_none() {
+        return None;
+    }
+    let leaked = geo.as_deref().map(is_dns_leaked).unwrap_or(false);
+    Some(DnsProbeInfo { ip, geo, leaked })
+}
+
+async fn probe_edns(client: &Client, stagger_ms: u64) -> DnsProbeInfo {
+    if stagger_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(stagger_ms)).await;
+    }
+    for attempt in 0..2 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+        let url = fresh_edns_url();
+        if let Some(info) = fetch_json(client, &url).await.and_then(|v| parse_edns_response(&v)) {
+            return info;
+        }
+    }
+    if let Some(info) = fetch_json(client, "http://edns.ip-api.com/json")
+        .await
+        .and_then(|v| parse_edns_response(&v))
+    {
+        return info;
     }
     DnsProbeInfo {
         ip: None,
@@ -160,11 +206,11 @@ async fn probe_ipv6_leak() -> (bool, Option<String>) {
 pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
     let checked_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let pc = match build_proxy_client(cfg, 6) {
+    let pc = match build_proxy_client(cfg, 8) {
         Ok(c) => c,
         Err(_) => return fallback_error_report(cfg, checked_at),
     };
-    let dc = match build_direct_v4_client(6) {
+    let dc = match build_direct_v4_client(8) {
         Ok(c) => c,
         Err(_) => return fallback_error_report(cfg, checked_at),
     };
@@ -174,8 +220,8 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
             probe_trace_channel(&pc, "https://claude.ai/cdn-cgi/trace", false),
             probe_trace_channel(&dc, "https://1.1.1.1/cdn-cgi/trace", false),
             fetch_json(&pc, "https://my.ippure.com/v1/info"),
-            probe_edns(&pc),
-            probe_edns(&dc),
+            probe_edns(&pc, 0),
+            probe_edns(&dc, 180),
             probe_ipv6_leak()
         );
 
@@ -204,12 +250,14 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
     );
     let ipinfo_url = format!("https://ipinfo.io/widget/demo/{}", exit_ip);
 
-    let (proxycheck_val, ipapi_val, ipinfo_val) = tokio::join!(
+    let (proxycheck_val, raw_ipapi_val, ipinfo_val) = tokio::join!(
         fetch_json(&pc, &proxycheck_url),
         fetch_json(&pc, &ipapi_url),
         fetch_json(&pc, &ipinfo_url)
     );
 
+    let ipapi_val = raw_ipapi_val
+        .filter(|v| v.get("status").and_then(|s| s.as_str()) == Some("success"));
     let pc_entry = proxycheck_val.as_ref().and_then(|v| v.get(&exit_ip));
     let info_data = ipinfo_val.as_ref().and_then(|v| v.get("data"));
 
@@ -219,6 +267,7 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
         .or_else(|| ipapi_val.as_ref().and_then(|v| v.get("countryCode")).and_then(|x| x.as_str()).map(String::from))
         .or_else(|| ippure_val.as_ref().and_then(|v| v.get("countryCode")).and_then(|x| x.as_str()).map(String::from))
         .or_else(|| pc_entry.and_then(|v| v.get("isocode")).and_then(|x| x.as_str()).map(String::from))
+        .or_else(|| info_data.and_then(|v| v.get("country")).and_then(|x| x.as_str()).map(String::from))
         .unwrap_or_else(|| "??".to_string())
         .to_uppercase();
 
@@ -236,6 +285,7 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
         .and_then(|v| v.get("regionName"))
         .and_then(|x| x.as_str())
         .or_else(|| ippure_val.as_ref().and_then(|v| v.get("region")).and_then(|x| x.as_str()))
+        .or_else(|| info_data.and_then(|v| v.get("region")).and_then(|x| x.as_str()))
         .unwrap_or("")
         .to_string();
 
@@ -254,6 +304,8 @@ pub async fn run_purity_audit(cfg: &ShieldConfig) -> PurityReport {
         .and_then(|x| x.as_str())
         .or_else(|| ippure_val.as_ref().and_then(|v| v.get("asOrganization")).and_then(|x| x.as_str()))
         .or_else(|| pc_entry.and_then(|v| v.get("provider")).and_then(|x| x.as_str()))
+        .or_else(|| info_data.and_then(|v| v.pointer("/asn/name")).and_then(|x| x.as_str()))
+        .or_else(|| info_data.and_then(|v| v.get("org")).and_then(|x| x.as_str()))
         .unwrap_or("Unknown ISP")
         .to_string();
 
@@ -513,5 +565,50 @@ fn fallback_error_report(cfg: &ShieldConfig, checked_at: String) -> PurityReport
             detail: format!("请检查代理服务 127.0.0.1:{} 与 TUN 模式是否运行", cfg.proxy_port),
             penalty: -100,
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_edns_url_generates_unique_32_char_hex_subdomains() {
+        let u1 = fresh_edns_url();
+        let u2 = fresh_edns_url();
+        assert_ne!(u1, u2);
+        for url in [&u1, &u2] {
+            let rest = url
+                .strip_prefix("http://")
+                .and_then(|s| s.strip_suffix(".edns.ip-api.com/json"))
+                .expect("expected edns.ip-api.com URL format");
+            assert_eq!(rest.len(), 32, "edns.ip-api.com requires a 32-char nonce");
+            assert!(
+                rest.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "nonce must be lowercase hex"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_edns_response_validates_payload_and_detects_leaks() {
+        let empty = serde_json::json!({});
+        assert!(parse_edns_response(&empty).is_none());
+
+        let blank = serde_json::json!({ "dns": { "ip": "  ", "geo": "" } });
+        assert!(parse_edns_response(&blank).is_none());
+
+        let clean = serde_json::json!({
+            "dns": { "ip": "104.22.194.86", "geo": "United States - Cloudflare, Inc." }
+        });
+        let info = parse_edns_response(&clean).expect("valid clean edns");
+        assert_eq!(info.ip.as_deref(), Some("104.22.194.86"));
+        assert!(!info.leaked);
+
+        let leaked = serde_json::json!({
+            "dns": { "ip": "202.96.128.86", "geo": "China - China Telecom" }
+        });
+        let leaked_info = parse_edns_response(&leaked).expect("valid leaked edns");
+        assert!(leaked_info.leaked);
     }
 }

@@ -47,6 +47,7 @@ enum MenuBarShieldState: Hashable {
     case alert
 }
 
+@MainActor
 enum ShieldBrandGraphics {
     private static var menuBarIconCache: [MenuBarShieldState: NSImage] = [:]
     private static var badgeEmblemCache: [String: NSImage] = [:]

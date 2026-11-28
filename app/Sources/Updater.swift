@@ -11,7 +11,7 @@ enum AppReleaseConfig {
            !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return v.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return "3.7.0"
+        return "3.7.1"
     }
 
     static var shortDisplayVersion: String {
@@ -313,7 +313,7 @@ enum GitHubUpdater {
         return AppUpdateInfo(
             version: AppReleaseConfig.normalizedVersion(release.tag_name),
             tagName: release.tag_name,
-            title: (release.name?.isEmpty == false ? release.name! : release.tag_name),
+            title: release.name.flatMap { $0.isEmpty ? nil : $0 } ?? release.tag_name,
             notesSummary: summarizeNotes(release.body),
             htmlURL: htmlURL,
             zipDownloadURL: matchedZip.flatMap { URL(string: $0.browser_download_url) },
