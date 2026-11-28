@@ -68,6 +68,7 @@ final class ShieldViewModel: ObservableObject {
     private var isAuditingDefenses: Bool = false
     private var isHidingOriginalApp: Bool = false
     private var isProbeInFlight: Bool = false
+    var inFlightKillCLIPIDs: Set<String> = []
     private var pathDebounceTask: Task<Void, Never>?
     private var toastDismissTask: Task<Void, Never>?
     private var pendingRefresh: (mode: TelemetryProbeMode, resetPool: Bool, userInitiated: Bool)?
@@ -436,7 +437,10 @@ final class ShieldViewModel: ObservableObject {
                         )
                     }
                     if updated.hasUnprotectedCLI {
-                        self.killUnprotectedCLI(pids: defenses.unprotected_cli_pids)
+                        self.killUnprotectedCLI(
+                            pids: defenses.unprotected_cli_pids,
+                            details: defenses.unprotectedCLIDetails
+                        )
                     }
                 }
             }
@@ -542,7 +546,10 @@ final class ShieldViewModel: ObservableObject {
                     )
                 }
                 if result.hasUnprotectedCLI {
-                    self.killUnprotectedCLI(pids: result.defenses.unprotected_cli_pids)
+                    self.killUnprotectedCLI(
+                        pids: result.defenses.unprotected_cli_pids,
+                        details: result.defenses.unprotectedCLIDetails
+                    )
                 }
             }
 

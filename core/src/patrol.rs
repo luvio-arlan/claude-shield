@@ -93,13 +93,23 @@ pub async fn run_daily_patrol(cfg: &ShieldConfig, notify: bool, auto_kill: bool)
         }
     }
     if !defenses.unprotected_cli_pids.is_empty() {
+        let summary = if defenses.unprotected_cli_details.is_empty() {
+            format!("{:?}", defenses.unprotected_cli_pids)
+        } else {
+            defenses.unprotected_cli_details.join("、")
+        };
         alerts.push(format!(
-            "发现未受代理保护的 Claude Code 终端进程: {:?}",
-            defenses.unprotected_cli_pids
+            "发现未受代理保护的 Claude Code 终端进程: {}",
+            summary
         ));
         if auto_kill {
-            kill_pids(&defenses.unprotected_cli_pids);
-            auto_healed.push("已自动终止未受保护的 Claude Code 进程".to_string());
+            let killed = kill_pids(&defenses.unprotected_cli_pids);
+            if killed > 0 {
+                auto_healed.push(format!(
+                    "已自动终止 {} 个未受保护的 Claude Code 进程（{}）",
+                    killed, summary
+                ));
+            }
         }
     }
 

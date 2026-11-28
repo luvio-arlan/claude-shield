@@ -328,18 +328,46 @@ extension ShieldViewModel {
         }
     }
 
-    func killUnprotectedCLI(pids: [String]) {
+    func killUnprotectedCLI(pids: [String], details: [String] = []) {
+        let candidatePIDs = pids.filter { !inFlightKillCLIPIDs.contains($0) }
+        guard !candidatePIDs.isEmpty else { return }
+        inFlightKillCLIPIDs.formUnion(candidatePIDs)
+
         Task.detached(priority: .userInitiated) {
-            _ = RustCoreBridge.killPIDs(pids)
-            Self.postSystemNotificationAsync(
-                title: "Claude Shield 熔断急停",
-                body: "发现未走安全门禁的 Claude Code 进程，已自动终止防裸连！"
-            )
-            await MainActor.run {
-                self.showToast("已终止未受保护的 CLI 进程")
+            // Brief 120ms re-verification eliminates fork/execve races and transient probes
+            // before sending SIGKILL or surfacing a breach alert.
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            let freshDefenses = RustCoreBridge.fetchLocalDefenses()
+            let freshSet = Set(freshDefenses?.unprotected_cli_pids ?? [])
+            let confirmedPIDs = candidatePIDs.filter { freshSet.contains($0) }
+            guard !confirmedPIDs.isEmpty else {
+                await MainActor.run {
+                    self.inFlightKillCLIPIDs.subtract(candidatePIDs)
+                }
+                return
             }
+
+            let confirmedDetails = freshDefenses?.unprotectedCLIDetails.filter { detail in
+                confirmedPIDs.contains { pid in detail.hasPrefix("#\(pid) ") }
+            } ?? details
+            let killed = RustCoreBridge.killPIDs(confirmedPIDs)
+
+            if killed > 0 {
+                let targetSummary = confirmedDetails.isEmpty
+                    ? confirmedPIDs.map { "#\($0)" }.joined(separator: "、")
+                    : confirmedDetails.joined(separator: "；")
+                Self.postSystemNotificationAsync(
+                    title: "Claude Shield 熔断急停",
+                    body: "发现未走安全门禁的 Claude Code 进程（\(targetSummary)），已自动终止防裸连！"
+                )
+                await MainActor.run {
+                    self.showToast("已终止 \(killed) 个未受保护的 CLI 进程（\(targetSummary)）")
+                }
+            }
+
             try? await Task.sleep(nanoseconds: 600_000_000)
             await MainActor.run {
+                self.inFlightKillCLIPIDs.subtract(candidatePIDs)
                 self.auditDefensesImmediately()
             }
         }
@@ -348,7 +376,8 @@ extension ShieldViewModel {
     func emergencyKillClaude(includeCLI: Bool = true, reason: String? = nil) {
         Task.detached(priority: .userInitiated) {
             let outcome = RustCoreBridge.killClaude(includeCLI: includeCLI)
-            if let reason = reason {
+            let totalKilled = (outcome?.killed_desktop ?? 0) + (outcome?.killed_cli ?? 0)
+            if let reason = reason, totalKilled > 0 {
                 Self.postSystemNotificationAsync(title: "Claude Shield 熔断急停", body: reason)
             }
             await MainActor.run {

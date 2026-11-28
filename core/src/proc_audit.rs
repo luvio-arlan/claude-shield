@@ -10,6 +10,7 @@ pub struct ClaudeProcessInspection {
     pub desktop_webrtc_locked: bool,
     pub active_cli_pids: Vec<String>,
     pub unprotected_cli_pids: Vec<String>,
+    pub unprotected_cli_details: Vec<String>,
 }
 
 impl Default for ClaudeProcessInspection {
@@ -23,6 +24,7 @@ impl Default for ClaudeProcessInspection {
             desktop_webrtc_locked: true,
             active_cli_pids: Vec::new(),
             unprotected_cli_pids: Vec::new(),
+            unprotected_cli_details: Vec::new(),
         }
     }
 }
@@ -51,32 +53,66 @@ fn is_dangerous_no_proxy_value(val: &str) -> bool {
     })
 }
 
-pub(crate) fn has_expected_proxy_env_entries(envp: &[String], proxy_port: u16) -> bool {
-    if envp.is_empty() {
+fn is_expected_local_proxy_url(raw: &str, proxy_port: u16) -> bool {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let Some((scheme, authority)) = trimmed.split_once("://") else {
+        return false;
+    };
+    let scheme_ok = matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "http" | "https" | "socks5" | "socks5h"
+    );
+    if !scheme_ok {
         return false;
     }
-    let http_upper = format!("HTTP_PROXY=http://127.0.0.1:{}", proxy_port);
-    let http_lower = format!("http_proxy=http://127.0.0.1:{}", proxy_port);
-    let https_upper = format!("HTTPS_PROXY=http://127.0.0.1:{}", proxy_port);
-    let https_lower = format!("https_proxy=http://127.0.0.1:{}", proxy_port);
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let expected_ip = format!("127.0.0.1:{}", proxy_port);
+    let expected_localhost = format!("localhost:{}", proxy_port);
+    host_port.eq_ignore_ascii_case(&expected_ip) || host_port.eq_ignore_ascii_case(&expected_localhost)
+}
 
-    let has_http = envp.iter().any(|e| e == &http_upper || e == &http_lower);
-    let has_https = envp.iter().any(|e| e == &https_upper || e == &https_lower);
-    if !has_http || !has_https {
-        return false;
+pub(crate) fn audit_proxy_env_entries(envp: &[String], proxy_port: u16) -> Result<(), &'static str> {
+    if envp.is_empty() {
+        return Err("缺少代理环境变量");
     }
+
+    let mut has_http = false;
+    let mut has_https = false;
 
     for entry in envp {
         if let Some(val) = entry
+            .strip_prefix("HTTP_PROXY=")
+            .or_else(|| entry.strip_prefix("http_proxy="))
+        {
+            if is_expected_local_proxy_url(val, proxy_port) {
+                has_http = true;
+            }
+        } else if let Some(val) = entry
+            .strip_prefix("HTTPS_PROXY=")
+            .or_else(|| entry.strip_prefix("https_proxy="))
+        {
+            if is_expected_local_proxy_url(val, proxy_port) {
+                has_https = true;
+            }
+        } else if let Some(val) = entry
             .strip_prefix("NO_PROXY=")
             .or_else(|| entry.strip_prefix("no_proxy="))
         {
             if is_dangerous_no_proxy_value(val) {
-                return false;
+                return Err("NO_PROXY 放行了 Anthropic 域名");
             }
         }
     }
-    true
+
+    if !has_http || !has_https {
+        return Err("缺少代理环境变量");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn has_expected_proxy_env_entries(envp: &[String], proxy_port: u16) -> bool {
+    audit_proxy_env_entries(envp, proxy_port).is_ok()
 }
 
 fn raw_procargs_contains_ascii(haystack: &[u8], needle: &[u8]) -> bool {
@@ -125,6 +161,11 @@ pub(crate) fn parse_procargs2(buf: &[u8]) -> Option<(Vec<String>, Vec<String>)> 
         }
     }
 
+    // Skip any NUL alignment or setproctitle padding between argv[argc-1] and envp[0]
+    while pos < buf.len() && buf[pos] == 0 {
+        pos += 1;
+    }
+
     let mut envp = Vec::new();
     while pos < buf.len() {
         if buf[pos] == 0 {
@@ -156,7 +197,8 @@ mod macos {
     const KERN_ARGMAX: i32 = 8;
     const KERN_PROCARGS2: i32 = 49;
     const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
-    const MAX_PROCARGS_CAP: usize = 512 * 1024;
+    const INITIAL_PROCARGS_CAP: usize = 262_144;
+    const MAX_PROCARGS_CAP: usize = 1024 * 1024;
     const FALLBACK_ARGMAX: usize = 262_144;
 
     extern "C" {
@@ -237,25 +279,34 @@ mod macos {
 
     pub(super) fn read_raw_procargs2(pid: i32, raw_buf: &mut Vec<u8>) -> Option<usize> {
         let max_size = kern_argmax();
-        if raw_buf.len() < max_size {
-            raw_buf.resize(max_size, 0);
+        let initial_cap = INITIAL_PROCARGS_CAP.min(max_size);
+        if raw_buf.len() < initial_cap {
+            raw_buf.resize(initial_cap, 0);
         }
         let mib = [CTL_KERN, KERN_PROCARGS2, pid];
-        let mut len = max_size;
-        let rc = unsafe {
-            sysctl(
-                mib.as_ptr(),
-                3,
-                raw_buf.as_mut_ptr().cast::<c_void>(),
-                &mut len,
-                ptr::null(),
-                0,
-            )
-        };
-        if rc != 0 || len < 4 {
+        loop {
+            let mut len = raw_buf.len();
+            let rc = unsafe {
+                sysctl(
+                    mib.as_ptr(),
+                    3,
+                    raw_buf.as_mut_ptr().cast::<c_void>(),
+                    &mut len,
+                    ptr::null(),
+                    0,
+                )
+            };
+            if rc == 0 && len >= 4 {
+                return Some(len);
+            }
+            let err = std::io::Error::last_os_error().raw_os_error();
+            if err == Some(12) && raw_buf.len() < max_size {
+                let next_cap = raw_buf.len().saturating_mul(2).min(max_size);
+                raw_buf.resize(next_cap, 0);
+                continue;
+            }
             return None;
         }
-        Some(len)
     }
 
     #[cfg(test)]
@@ -338,14 +389,25 @@ mod macos {
             let Some((args, envp)) = parse_procargs2(slice) else {
                 continue;
             };
-            let args_joined = args.join(" ");
-            if !is_genuine_claude_cli_args(exec_path, &args_joined) {
+            if !is_genuine_claude_cli_args(exec_path, &args) {
                 continue;
             }
             let pid_str = pid.to_string();
             out.active_cli_pids.push(pid_str.clone());
-            if !has_expected_proxy_env_entries(&envp, proxy_port) {
-                out.unprotected_cli_pids.push(pid_str);
+            // Empty envp on macOS indicates a transient mid-execve / exiting / setproctitle-truncated
+            // kernel buffer rather than an intentionally stripped process; skip to avoid false kills.
+            if envp.is_empty() {
+                continue;
+            }
+            if let Err(reason) = audit_proxy_env_entries(&envp, proxy_port) {
+                let proc_label = if matches!(base, "node" | "bun") {
+                    format!("{}/claude-code", base)
+                } else {
+                    base.to_string()
+                };
+                out.unprotected_cli_pids.push(pid_str.clone());
+                out.unprotected_cli_details
+                    .push(format!("#{} {} ({})", pid_str, proc_label, reason));
             }
         }
 
@@ -432,6 +494,45 @@ mod tests {
             ],
             7897
         ));
+        // Trailing slash and localhost variants should be accepted as protected
+        assert!(has_expected_proxy_env_entries(
+            &[
+                "HTTP_PROXY=http://127.0.0.1:7897/".into(),
+                "HTTPS_PROXY=http://localhost:7897/".into(),
+            ],
+            7897
+        ));
+        assert!(has_expected_proxy_env_entries(
+            &[
+                "http_proxy=socks5h://127.0.0.1:7897".into(),
+                "https_proxy=socks5h://127.0.0.1:7897".into(),
+            ],
+            7897
+        ));
+        // Wrong port must still be rejected
+        assert!(!has_expected_proxy_env_entries(
+            &[
+                "HTTP_PROXY=http://127.0.0.1:7890".into(),
+                "HTTPS_PROXY=http://127.0.0.1:7890".into(),
+            ],
+            7897
+        ));
+    }
+
+    #[test]
+    fn parse_procargs2_skips_nul_padding_between_argv_and_envp() {
+        // Simulate setproctitle / alignment NUL padding right after argv[argc-1]
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&2i32.to_ne_bytes());
+        blob.extend_from_slice(b"/opt/homebrew/bin/claude\0\0\0");
+        blob.extend_from_slice(b"claude\0\0\0\0\0\0\0");
+        blob.extend_from_slice(b"HTTP_PROXY=http://127.0.0.1:7897\0");
+        blob.extend_from_slice(b"HTTPS_PROXY=http://127.0.0.1:7897\0\0");
+
+        let (args, envp) = parse_procargs2(&blob).expect("parse padded procargs2");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "claude");
+        assert!(has_expected_proxy_env_entries(&envp, 7897));
     }
 
     #[test]

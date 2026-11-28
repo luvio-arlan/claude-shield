@@ -173,6 +173,18 @@ def check_swift_guardrails(errors: list[str]) -> None:
                 )
             )
 
+    actions_path = APP_SOURCES_DIR / "ShieldViewModelActions.swift"
+    if actions_path.exists():
+        actions_text = actions_path.read_text(encoding="utf-8")
+        if "_ = RustCoreBridge.killPIDs(" in actions_text:
+            errors.append(
+                fail(
+                    "NO_BLIND_CLI_KILL_NOTIFICATION",
+                    "app/Sources/ShieldViewModelActions.swift discards `RustCoreBridge.killPIDs(...)` return count before notifying.",
+                    "Confirm the killed count (`killed > 0`) after re-verifying unprotected PIDs so already-exited transient processes never trigger false breach alerts.",
+                )
+            )
+
     for ui_name in ("DashboardPuritySection.swift", "PopoverSections.swift"):
         ui_path = APP_SOURCES_DIR / ui_name
         if ui_path.exists():
@@ -283,6 +295,17 @@ def check_rust_guardrails(errors: list[str]) -> None:
                     "NO_PER_THREAD_PROCARGS_SCRATCH",
                     "core/src/proc_audit.rs stores large PROCARGS_SCRATCH buffers in `thread_local!`.",
                     "Share a single `OnceLock<Mutex<Vec<u8>>>` scratch buffer so arbitrary Swift GCD threads do not pin N×512KB dirty pages.",
+                )
+            )
+    guard_rs = ROOT / "core" / "src" / "guard.rs"
+    if guard_rs.exists():
+        guard_text = guard_rs.read_text(encoding="utf-8")
+        if 'args_str.contains("@anthropic-ai/claude-code")' in guard_text:
+            errors.append(
+                fail(
+                    "NO_SUBSTRING_NODE_CLI_MATCH",
+                    "core/src/guard.rs matches Node/Bun Claude Code CLI via raw substring scan across joined arguments.",
+                    "Inspect the parsed JS runtime entrypoint script path so npm/pnpm/MCP processes referencing claude-code are never falsely killed.",
                 )
             )
     for path in rust_files():

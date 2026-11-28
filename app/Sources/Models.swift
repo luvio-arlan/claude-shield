@@ -35,6 +35,7 @@ struct LocalDefenseModel: Codable, Sendable {
     let desktop_webrtc_locked: Bool
     let active_cli_pids: [String]?
     let unprotected_cli_pids: [String]
+    let unprotected_cli_details: [String]?
     let cli_ready: Bool
     let login_item_enabled: Bool
     let daily_patrol_enabled: Bool
@@ -43,6 +44,7 @@ struct LocalDefenseModel: Codable, Sendable {
     var isDesktopBypassLocked: Bool { desktop_bypass_locked ?? true }
     var allDesktopPIDs: [String] { desktop_pids ?? desktop_pid.map { [$0] } ?? [] }
     var activeCLIPIDs: [String] { active_cli_pids ?? [] }
+    var unprotectedCLIDetails: [String] { unprotected_cli_details ?? [] }
 }
 
 struct LaunchDesktopOutcomeModel: Codable, Sendable {
@@ -162,6 +164,7 @@ struct TelemetrySnapshot: Codable, Sendable {
             desktop_webrtc_locked: true,
             active_cli_pids: [],
             unprotected_cli_pids: [],
+            unprotected_cli_details: [],
             cli_ready: false,
             login_item_enabled: false,
             daily_patrol_enabled: false

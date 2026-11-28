@@ -80,6 +80,8 @@ pub struct LocalDefenseAudit {
     #[serde(default)]
     pub active_cli_pids: Vec<String>,
     pub unprotected_cli_pids: Vec<String>,
+    #[serde(default)]
+    pub unprotected_cli_details: Vec<String>,
     pub cli_ready: bool,
     pub login_item_enabled: bool,
     pub daily_patrol_enabled: bool,
@@ -135,22 +137,148 @@ fn is_native_versioned_claude_path(comm: &str) -> bool {
     comm.contains("/.local/share/claude/versions/") || comm.contains("/claude/versions/")
 }
 
-pub(crate) fn is_candidate_cli_comm(comm: &str) -> bool {
+fn is_npm_native_claude_binary(comm: &str) -> bool {
     let base = comm.rsplit('/').next().unwrap_or(comm);
-    matches!(base, "claude" | "node" | "bun") || is_native_versioned_claude_path(comm)
+    base == "claude.exe"
+        && (comm.contains("/@anthropic-ai/claude-code/") || comm.contains("/claude-code/"))
 }
 
-pub(crate) fn is_genuine_claude_cli_args(comm: &str, args_str: &str) -> bool {
+fn is_shield_wrapper_token(token: &str) -> bool {
+    token.contains("claude-shield")
+        || token.contains("ClaudeShield")
+        || token.contains("claude-guard")
+        || token.contains("claude-desktop-safe")
+        || token.contains("Claude.app/")
+}
+
+fn is_claude_code_js_entrypoint(script: &str) -> bool {
+    let normalized = script.replace('\\', "/");
+    normalized.ends_with("/@anthropic-ai/claude-code/cli.js")
+        || normalized.ends_with("/@anthropic-ai/claude-code/cli.mjs")
+        || normalized.ends_with("/@anthropic-ai/claude-code/bin/claude")
+        || normalized.ends_with("/@anthropic-ai/claude-code/bin/claude.js")
+        || normalized.ends_with("/@anthropic-ai/claude-code/bin/claude.mjs")
+        || normalized.ends_with("/@anthropic-ai/claude-code/bin/claude.exe")
+        || normalized.ends_with("/claude-code/cli.js")
+        || normalized.ends_with("/claude-code/cli.mjs")
+        || normalized.ends_with("/claude-code/bin/claude")
+        || normalized.ends_with("/claude-code/bin/claude.js")
+        || normalized.ends_with("/claude-code/bin/claude.mjs")
+}
+
+fn extract_js_runtime_entrypoint(args: &[String]) -> Option<(usize, &str)> {
+    let mut i = 1usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg.is_empty() {
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            let next = i + 1;
+            return args.get(next).map(|s| (next, s.as_str()));
+        }
+        if matches!(
+            arg,
+            "-e" | "--eval" | "-p" | "--print" | "-c" | "--check" | "-i" | "--interactive" | "-v" | "--version" | "-h" | "--help"
+        ) {
+            return None;
+        }
+        if matches!(
+            arg,
+            "-r" | "--require"
+                | "--import"
+                | "--loader"
+                | "--experimental-loader"
+                | "-C"
+                | "--conditions"
+                | "--env-file"
+                | "--env-file-if-exists"
+                | "--title"
+                | "--redirect-warnings"
+                | "--diagnostic-dir"
+                | "--heapsnapshot-signal"
+                | "--cpu-prof-dir"
+                | "--cpu-prof-name"
+                | "--heap-prof-dir"
+                | "--heap-prof-name"
+                | "--max-old-space-size"
+                | "--cwd"
+                | "--config"
+                | "-b"
+                | "--preload"
+        ) {
+            i += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        if arg == "run" && i + 1 < args.len() {
+            i += 1;
+            continue;
+        }
+        return Some((i, arg));
+    }
+    None
+}
+
+pub(crate) fn is_offline_claude_cli_args(cli_args: &[String]) -> bool {
+    let non_empty: Vec<&str> = cli_args
+        .iter()
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .collect();
+    matches!(
+        non_empty.as_slice(),
+        ["--version"]
+            | ["-v"]
+            | ["-V"]
+            | ["--help"]
+            | ["-h"]
+            | ["help"]
+            | [_, "--help"]
+            | [_, "-h"]
+            | ["help", _]
+    )
+}
+
+pub(crate) fn is_candidate_cli_comm(comm: &str) -> bool {
+    if is_shield_wrapper_token(comm) {
+        return false;
+    }
     let base = comm.rsplit('/').next().unwrap_or(comm);
-    let is_claude_bin = base == "claude" || is_native_versioned_claude_path(comm);
-    let is_node_claude = (base == "node" || base == "bun")
-        && (args_str.contains("@anthropic-ai/claude-code") || args_str.contains("/claude-code/"));
-    (is_claude_bin || is_node_claude)
-        && !args_str.contains("claude-shield")
-        && !args_str.contains("ClaudeShield")
-        && !args_str.contains("Claude.app")
-        && !args_str.contains("claude-guard")
-        && !args_str.contains("claude-desktop-safe")
+    matches!(base, "claude" | "node" | "bun")
+        || is_native_versioned_claude_path(comm)
+        || is_npm_native_claude_binary(comm)
+}
+
+pub(crate) fn is_genuine_claude_cli_args(comm: &str, args: &[String]) -> bool {
+    if is_shield_wrapper_token(comm)
+        || args.first().map(|a| is_shield_wrapper_token(a)).unwrap_or(false)
+    {
+        return false;
+    }
+    let base = comm.rsplit('/').next().unwrap_or(comm);
+    let is_claude_bin = base == "claude"
+        || is_native_versioned_claude_path(comm)
+        || is_npm_native_claude_binary(comm);
+    if is_claude_bin {
+        let cli_args = args.get(1..).unwrap_or(&[]);
+        return !is_offline_claude_cli_args(cli_args);
+    }
+    if matches!(base, "node" | "bun") {
+        let Some((script_idx, script)) = extract_js_runtime_entrypoint(args) else {
+            return false;
+        };
+        if !is_claude_code_js_entrypoint(script) || is_shield_wrapper_token(script) {
+            return false;
+        }
+        let cli_args = args.get(script_idx + 1..).unwrap_or(&[]);
+        return !is_offline_claude_cli_args(cli_args);
+    }
+    false
 }
 
 pub fn apply_hardened_env(cmd: &mut Command, cfg: &ShieldConfig) {
@@ -240,6 +368,7 @@ pub fn audit_local_defenses(cfg: &ShieldConfig) -> LocalDefenseAudit {
         desktop_webrtc_locked: procs.desktop_webrtc_locked,
         active_cli_pids: procs.active_cli_pids,
         unprotected_cli_pids: procs.unprotected_cli_pids,
+        unprotected_cli_details: procs.unprotected_cli_details,
         cli_ready,
         login_item_enabled,
         daily_patrol_enabled,
@@ -524,22 +653,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cli_matching_covers_native_versions_and_excludes_wrappers() {
+    fn cli_matching_covers_native_versions_and_avoids_false_positives() {
+        let s = |items: &[&str]| items.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
         assert!(is_candidate_cli_comm("/opt/homebrew/bin/claude"));
         assert!(is_candidate_cli_comm("/usr/local/bin/node"));
         assert!(is_candidate_cli_comm("/Users/u/.local/share/claude/versions/2.1.45"));
+        assert!(is_candidate_cli_comm(
+            "/Users/u/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+        ));
         assert!(!is_candidate_cli_comm("/usr/bin/python3"));
+        assert!(!is_candidate_cli_comm("/Users/u/.local/bin/claude-shield-core"));
 
-        assert!(is_genuine_claude_cli_args("claude", "claude --resume"));
+        assert!(is_genuine_claude_cli_args("claude", &s(&["claude", "--resume"])));
         assert!(is_genuine_claude_cli_args(
             "/Users/u/.local/share/claude/versions/2.1.45",
-            "claude --resume"
+            &s(&["claude", "--resume"])
+        ));
+        assert!(is_genuine_claude_cli_args(
+            "/Users/u/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+            &s(&["claude", "--resume"])
         ));
         assert!(is_genuine_claude_cli_args(
             "node",
-            "node /opt/node_modules/@anthropic-ai/claude-code/cli.js"
+            &s(&["node", "--no-warnings", "/opt/node_modules/@anthropic-ai/claude-code/cli.js", "--resume"])
         ));
-        assert!(!is_genuine_claude_cli_args("claude", "claude-shield-core exec-cli"));
+
+        // Offline local metadata probes must NEVER trigger kill-switch false positives
+        assert!(!is_genuine_claude_cli_args("claude", &s(&["claude", "--version"])));
+        assert!(!is_genuine_claude_cli_args("claude", &s(&["claude", "-v"])));
+        assert!(!is_genuine_claude_cli_args("claude", &s(&["claude", "--help"])));
+        assert!(!is_genuine_claude_cli_args("claude", &s(&["claude", "mcp", "--help"])));
+        assert!(!is_genuine_claude_cli_args(
+            "node",
+            &s(&["node", "/opt/node_modules/@anthropic-ai/claude-code/cli.js", "--version"])
+        ));
+
+        // Non-Claude node/bun commands mentioning @anthropic-ai/claude-code or /claude-code/ must NEVER match
+        assert!(!is_genuine_claude_cli_args(
+            "node",
+            &s(&["node", "/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js", "install", "-g", "@anthropic-ai/claude-code"])
+        ));
+        assert!(!is_genuine_claude_cli_args(
+            "node",
+            &s(&["node", "/Users/u/mcp/server.js", "--cwd", "/Users/u/Library/Application Support/Claude/claude-code/2.1.331"])
+        ));
+        assert!(!is_genuine_claude_cli_args(
+            "node",
+            &s(&["node", "-e", "console.log('@anthropic-ai/claude-code')"])
+        ));
+        assert!(!is_genuine_claude_cli_args(
+            "claude",
+            &s(&["claude-shield-core", "exec-cli"])
+        ));
+        // Prompt mentioning claude-shield on a real claude process still counts as real CLI
+        assert!(is_genuine_claude_cli_args(
+            "/opt/homebrew/bin/claude",
+            &s(&["claude", "-p", "inspect claude-shield"])
+        ));
     }
 
     #[test]
