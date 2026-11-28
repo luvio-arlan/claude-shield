@@ -224,12 +224,55 @@ fn extract_js_runtime_entrypoint(args: &[String]) -> Option<(usize, &str)> {
     None
 }
 
+pub(crate) fn is_embedded_multicall_applet_argv0(args: &[String]) -> bool {
+    let Some(raw) = args.first() else {
+        return false;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let base = trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
+    matches!(
+        base.as_str(),
+        "rg" | "ripgrep"
+            | "ugrep"
+            | "ug"
+            | "grep"
+            | "egrep"
+            | "fgrep"
+            | "zgrep"
+            | "zegrep"
+            | "zfgrep"
+            | "bfs"
+            | "find"
+            | "fd"
+    )
+}
+
 pub(crate) fn is_offline_claude_cli_args(cli_args: &[String]) -> bool {
     let non_empty: Vec<&str> = cli_args
         .iter()
         .map(String::as_str)
         .filter(|s| !s.is_empty())
         .collect();
+    if let Some(first) = non_empty.first().copied() {
+        if matches!(
+            first,
+            "--ripgrep"
+                | "--chrome-native-host"
+                | "--claude-in-chrome-mcp"
+                | "--computer-use-mcp"
+                | "--bg-pty-host"
+                | "--check-against-schema"
+        ) {
+            return true;
+        }
+    }
     matches!(
         non_empty.as_slice(),
         ["--version"]
@@ -265,6 +308,9 @@ pub(crate) fn is_genuine_claude_cli_args(comm: &str, args: &[String]) -> bool {
         || is_native_versioned_claude_path(comm)
         || is_npm_native_claude_binary(comm);
     if is_claude_bin {
+        if is_embedded_multicall_applet_argv0(args) {
+            return false;
+        }
         let cli_args = args.get(1..).unwrap_or(&[]);
         return !is_offline_claude_cli_args(cli_args);
     }
@@ -709,6 +755,26 @@ mod tests {
         assert!(is_genuine_claude_cli_args(
             "/opt/homebrew/bin/claude",
             &s(&["claude", "-p", "inspect claude-shield"])
+        ));
+        // Embedded BusyBox-style ARGV0 utility applets (ugrep/bfs/rg) must NEVER trigger false kills
+        let desktop_cc = "/Users/u/Library/Application Support/Claude/claude-code/2.1.331/5cdc/claude.app/Contents/MacOS/claude";
+        assert!(!is_genuine_claude_cli_args(desktop_cc, &s(&["ugrep", "-G", "--hidden", "foo"])));
+        assert!(!is_genuine_claude_cli_args(desktop_cc, &s(&["bfs", "-S", "dfs", "."])));
+        assert!(!is_genuine_claude_cli_args(desktop_cc, &s(&["rg", "--files"])));
+        assert!(!is_genuine_claude_cli_args(
+            "/Users/u/.local/share/claude/versions/2.1.331",
+            &s(&["ugrep", "-iE", "EX-99"])
+        ));
+        // Local-only helper/bridge flags must NEVER trigger false kills
+        assert!(!is_genuine_claude_cli_args(desktop_cc, &s(&["claude", "--ripgrep", "--files"])));
+        assert!(!is_genuine_claude_cli_args(desktop_cc, &s(&["claude", "--chrome-native-host"])));
+        assert!(!is_genuine_claude_cli_args(desktop_cc, &s(&["claude", "--claude-in-chrome-mcp"])));
+        assert!(!is_genuine_claude_cli_args(desktop_cc, &s(&["claude", "--computer-use-mcp"])));
+        assert!(!is_genuine_claude_cli_args(desktop_cc, &s(&["claude", "--bg-pty-host"])));
+        // Real Desktop-spawned Claude Code session with full executable argv[0] still matches
+        assert!(is_genuine_claude_cli_args(
+            desktop_cc,
+            &s(&[desktop_cc, "--output-format", "stream-json"])
         ));
     }
 

@@ -78,12 +78,16 @@ pub(crate) fn audit_proxy_env_entries(envp: &[String], proxy_port: u16) -> Resul
 
     let mut has_http = false;
     let mut has_https = false;
+    let mut saw_any_proxy = false;
 
     for entry in envp {
         if let Some(val) = entry
             .strip_prefix("HTTP_PROXY=")
             .or_else(|| entry.strip_prefix("http_proxy="))
         {
+            if !val.trim().is_empty() {
+                saw_any_proxy = true;
+            }
             if is_expected_local_proxy_url(val, proxy_port) {
                 has_http = true;
             }
@@ -91,6 +95,9 @@ pub(crate) fn audit_proxy_env_entries(envp: &[String], proxy_port: u16) -> Resul
             .strip_prefix("HTTPS_PROXY=")
             .or_else(|| entry.strip_prefix("https_proxy="))
         {
+            if !val.trim().is_empty() {
+                saw_any_proxy = true;
+            }
             if is_expected_local_proxy_url(val, proxy_port) {
                 has_https = true;
             }
@@ -105,7 +112,11 @@ pub(crate) fn audit_proxy_env_entries(envp: &[String], proxy_port: u16) -> Resul
     }
 
     if !has_http || !has_https {
-        return Err("缺少代理环境变量");
+        return Err(if saw_any_proxy {
+            "代理端口或地址不匹配"
+        } else {
+            "缺少代理环境变量"
+        });
     }
     Ok(())
 }
@@ -403,7 +414,15 @@ mod macos {
                 let proc_label = if matches!(base, "node" | "bun") {
                     format!("{}/claude-code", base)
                 } else {
-                    base.to_string()
+                    let argv0_base = args
+                        .first()
+                        .map(|a| a.rsplit('/').next().unwrap_or(a.as_str()))
+                        .unwrap_or("");
+                    if !argv0_base.is_empty() && argv0_base != base {
+                        format!("{}[{}]", base, argv0_base)
+                    } else {
+                        base.to_string()
+                    }
                 };
                 out.unprotected_cli_pids.push(pid_str.clone());
                 out.unprotected_cli_details
@@ -509,14 +528,22 @@ mod tests {
             ],
             7897
         ));
-        // Wrong port must still be rejected
-        assert!(!has_expected_proxy_env_entries(
-            &[
-                "HTTP_PROXY=http://127.0.0.1:7890".into(),
-                "HTTPS_PROXY=http://127.0.0.1:7890".into(),
-            ],
-            7897
-        ));
+        // Wrong port must still be rejected with specific port-mismatch reason
+        assert_eq!(
+            audit_proxy_env_entries(
+                &[
+                    "HTTP_PROXY=http://127.0.0.1:7890".into(),
+                    "HTTPS_PROXY=http://127.0.0.1:7890".into(),
+                ],
+                7897
+            ),
+            Err("代理端口或地址不匹配")
+        );
+        // Truly missing proxy env reports missing-env reason
+        assert_eq!(
+            audit_proxy_env_entries(&["PATH=/usr/bin".into()], 7897),
+            Err("缺少代理环境变量")
+        );
     }
 
     #[test]

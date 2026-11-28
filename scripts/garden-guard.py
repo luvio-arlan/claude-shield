@@ -308,6 +308,14 @@ def check_rust_guardrails(errors: list[str]) -> None:
                     "Inspect the parsed JS runtime entrypoint script path so npm/pnpm/MCP processes referencing claude-code are never falsely killed.",
                 )
             )
+        if "is_embedded_multicall_applet_argv0(" not in guard_text:
+            errors.append(
+                fail(
+                    "NO_MULTICALL_APPLET_CLI_FALSE_POSITIVE",
+                    "core/src/guard.rs does not filter Claude Code embedded multicall ARGV0 utility applets (ugrep/bfs/rg).",
+                    "Check `is_embedded_multicall_applet_argv0(args)` inside `is_genuine_claude_cli_args` so sandboxed grep/find/rg invocations of the claude binary are never falsely killed.",
+                )
+            )
     for path in rust_files():
         rel = path.relative_to(ROOT).as_posix()
         text = path.read_text(encoding="utf-8")
